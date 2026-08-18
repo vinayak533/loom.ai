@@ -1,0 +1,50 @@
+# --- secrets ---------------------------------------------------------------
+# Real values live only in these; the *.example twins are the tracked
+# templates and must stay blank. Checked at commit time, not assumed.
+.env
+.env.*
+.env.local
+.env.*.local
+!.env.example
+!.env.local.example
+
+# Anything shaped like a credential, wherever it lands. Belt and braces: the
+# rules above only catch the files we already know about.
+*.pem
+*.key
+*.p12
+*.pfx
+*_rsa
+*_ed25519
+credentials.json
+service-account*.json
+secrets.y*ml
+
+# --- python ----------------------------------------------------------------
+backend/.venv/
+__pycache__/
+*.py[cod]
+backend/data/
+*.sqlite
+*.sqlite-*
+
+# --- node ------------------------------------------------------------------
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+*.tsbuildinfo
+
+# --- misc ------------------------------------------------------------------
+.DS_Store
+*.log
+.vercel
+
+# --- tooling artefacts -----------------------------------------------------
+.playwright-mcp/
+frontend/.next-prod/
+
+# Per-machine Claude Code settings (permissions, local overrides). A global
+# ignore covers this on the machine it was written on; repeating it here is
+# what makes the exclusion survive a clone.
+.claude/settings.local.json

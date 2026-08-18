@@ -1,0 +1,379 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Registered so the ambient field's anchor can be *transitioned* rather than
+   jumped when the agent changes what it is doing. Unsupported browsers simply
+   get the instant move, which is the reduced-motion behaviour anyway. */
+@property --field-x {
+  syntax: "<percentage>";
+  inherits: true;
+  initial-value: 62%;
+}
+@property --field-y {
+  syntax: "<percentage>";
+  inherits: true;
+  initial-value: 24%;
+}
+@property --field-strength {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 0.35;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+
+    /* Accent is the ONE thing that changes per section. Channels, not hex, so
+       Tailwind's <alpha-value> can derive soft/line/ring/glow from the same
+       token. Defaults here are Chat's; [data-section] overrides below.
+
+       --acc-rare is the reserved register: it belongs to the auto-router and
+       to nothing else, so it is always chosen to sit *outside* the section's
+       own accent pair rather than next to it. */
+    --acc: 138 169 255;
+    --acc-2: 177 144 255;
+    --acc-rare: 255 190 110;
+    --acc-ink: 10 14 28;
+
+    /* Radius is the second identity lever — Code sharpens everything. */
+    --r-card: 16px;
+    --r-ctl: 9px;
+    --r-bubble: 18px;
+
+    /* Where the ambient field's warm pole sits, in viewport percentages. The
+       agent's activity moves it; see AmbientField. */
+    --field-x: 62%;
+    --field-y: 24%;
+    --field-strength: 0.35;
+
+    /* The brand's own gold, sampled from the logo artwork.
+
+       This is NOT a fifth accent and it does not take part in the per-section
+       swap above. It is scoped to the two places the product signs its name —
+       the Code intro's weave and the sign-in lockup — and to nothing else.
+       Steady-state UI never reaches for it, which is the whole reason the
+       section accents stay meaningful. */
+    --gold: 244 231 173;
+  }
+
+  [data-section="chat"] {
+    --acc: 138 169 255; /* 8.4:1 on base */
+    --acc-2: 177 144 255;
+    --acc-rare: 255 190 110; /* amber — nothing else in Chat is warm */
+    --acc-ink: 10 14 28;
+    --r-card: 16px;
+    --r-ctl: 9px;
+    --r-bubble: 18px;
+  }
+
+  [data-section="learning"] {
+    --acc: 240 181 74; /* 10.4:1 */
+    --acc-2: 59 201 180; /*  9.3:1 */
+    --acc-rare: 173 152 255; /* violet — outside the amber/teal pair */
+    --acc-ink: 27 20 5;
+    --r-card: 16px;
+    --r-ctl: 9px;
+    --r-bubble: 18px;
+  }
+
+  [data-section="code"] {
+    --acc: 91 224 160; /* 11.5:1 */
+    --acc-2: 84 210 232; /* 10.7:1 */
+    --acc-rare: 255 155 196; /* rose — outside the green/cyan pair */
+    --acc-ink: 4 20 12;
+    --r-card: 9px; /* sharper, technical */
+    --r-ctl: 7px;
+    --r-bubble: 11px;
+  }
+
+  /* Agents. Violet, which is the one hue family none of the other three has
+     claimed — Chat is blue, Learn amber, Code green — so a glance at the
+     accent is enough to know which surface you are on. The radii sit between
+     Chat's soft 16px and Code's technical 9px: this section is a set of tools
+     you talk to, so it should read as neither a chat window nor an IDE. */
+  [data-section="agents"] {
+    --acc: 178 138 255; /* 7.6:1 on base */
+    --acc-2: 236 130 190; /* 8.1:1 */
+    --acc-rare: 120 220 190; /* mint — outside the violet/pink pair */
+    --acc-ink: 14 8 26;
+    --r-card: 13px;
+    --r-ctl: 8px;
+    --r-bubble: 15px;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  /* The floor. True black — #000000, not a near-black — the way ChatGPT's dark
+     theme is flat: one hex value with no hue and no vertical ramp, so nothing
+     in the background competes with the transcript. Every surface that has to
+     read as a surface is lifted above it by a white tint; see the ramp in
+     `tailwind.config.ts`.
+
+     The one thing kept from the old tinted bed is the agent-tracking radial —
+     but it is now white rather than accent-coloured and an order of magnitude
+     fainter, so at full strength it lifts the floor by ~1% and reads as a
+     barely-there breath of light, never as a colour wash. The moving parts
+     live in AmbientField; this is the static bed underneath them. */
+  body {
+    @apply text-ink font-sans antialiased;
+    background-color: theme("colors.base");
+    background-image: radial-gradient(
+      120% 90% at var(--field-x) var(--field-y),
+      rgb(255 255 255 / calc(0.012 * var(--field-strength))) 0%,
+      transparent 62%
+    );
+    background-attachment: fixed;
+    transition:
+      --field-x 1100ms cubic-bezier(0.4, 0, 0.2, 1),
+      --field-y 1100ms cubic-bezier(0.4, 0, 0.2, 1),
+      --field-strength 700ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  ::selection {
+    background: rgb(var(--acc) / 0.28);
+  }
+
+  /* One focus treatment everywhere: a ring floated off the surface so it reads
+     on any elevation. Keyboard only. */
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px theme("colors.base"),
+      0 0 0 4px rgb(var(--acc) / 0.42);
+    border-radius: inherit;
+  }
+}
+
+@layer components {
+  /* ------------------------------------------------------------------ depth */
+
+  /* A floating surface: translucent tint + blur + hairline + inner highlight.
+     This is the only way a panel is allowed to be drawn. */
+  .glass {
+    @apply border border-line bg-elevated shadow-float;
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+  }
+
+  /* The inverse move — for surfaces that *recede* rather than float, like the
+     context column behind the conversation.
+
+     On the old near-black floor this was a dark wash: it sank below the page.
+     With the page at true black there is nothing left to sink into, so the
+     relationship is expressed the other way round — the column is lifted by a
+     whisper (about a third of `surface`, and fading rather than even), far
+     less than the panels that float over it. It still reads as the furthest
+     thing back; it just gets there by being barely lit instead of by being
+     darker than a floor that is already at zero. */
+  .glass-recessed {
+    @apply border-line;
+    background: linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.022),
+      rgba(255, 255, 255, 0.012)
+    );
+    backdrop-filter: blur(14px) saturate(115%);
+    -webkit-backdrop-filter: blur(14px) saturate(115%);
+    box-shadow: inset 1px 0 0 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .panel {
+    @apply glass rounded-panel;
+  }
+
+  .hairline {
+    @apply border-line;
+  }
+
+  /* ------------------------------------------------------------- typography */
+
+  /* Four voices. They differ in family, size, leading and tracking — not in
+     colour alone — so a screenshot in greyscale still tells them apart. */
+
+  /** The agent talking. Widest measure, most air, lightest weight. */
+  .voice-agent {
+    @apply font-sans text-prose font-normal text-ink/90;
+  }
+
+  /** The user talking. Denser, slightly smaller, a touch more weight. */
+  .voice-said {
+    @apply font-sans text-said font-medium text-ink;
+  }
+
+  /** The agent reasoning. Mono, loose leading — a transcript, not prose. */
+  .voice-reason {
+    @apply font-mono text-reason font-normal text-ink-muted;
+  }
+
+  /** The machine: paths, arguments, stdout, numerals. */
+  .voice-machine {
+    @apply font-mono text-machine font-normal;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /** Eyebrows and section labels. */
+  .voice-label {
+    @apply font-mono text-label font-medium uppercase text-ink-faint;
+  }
+
+  /* --------------------------------------------------------------- controls */
+
+  .btn {
+    @apply inline-flex items-center gap-2 rounded-ctl px-3 py-1.5 text-sm
+           font-medium transition-colors duration-200 ease-out
+           disabled:opacity-40 disabled:pointer-events-none;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent text-accent-ink hover:brightness-110 active:scale-[0.985];
+  }
+
+  .btn-ghost {
+    @apply btn text-ink-muted hover:text-ink hover:bg-elevated;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-ctl border border-line
+           bg-elevated px-2 py-0.5 font-mono text-2xs text-ink-muted;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  }
+  .scroll-thin::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.22);
+    background-clip: content-box;
+  }
+  .scroll-thin::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /* ------------------------------------------------------ working shimmer */
+
+  /* A few words with a slow highlight passing through them — the quiet half of
+     the agent's working state, carried by text rather than by a graphic.
+     Deliberately its own class rather than a stack of utilities: the text is
+     painted *by* the animation, so the reduced-motion rule at the foot of this
+     file has to be able to take the whole treatment away as one unit rather
+     than merely stopping the motion and leaving transparent glyphs behind.
+
+     Its keyframes are declared here too, and not borrowed from Tailwind's:
+     Tailwind only emits `@keyframes shimmer` when an `animate-shimmer`
+     utility is actually in the build, which would make this animation quietly
+     stop working the day the last such utility is deleted. */
+  @keyframes work-shimmer {
+    from {
+      background-position: -200% 0;
+    }
+    to {
+      background-position: 200% 0;
+    }
+  }
+
+  .work-shimmer {
+    background-image: linear-gradient(
+      90deg,
+      rgb(var(--acc) / 0.42) 25%,
+      rgb(var(--acc) / 0.95) 42%,
+      rgb(var(--acc) / 0.42) 60%
+    );
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    /* 2.4s is `BREATH` in Anim.tsx. The shimmer used to run at 3.4s against
+       cues at 1.7–2.4s, so the label and the figure beside it drifted in and
+       out of phase on a ~9s cycle — the kind of thing nobody names but
+       everybody registers as cheap. One period, shared. */
+    animation: work-shimmer 2.4s linear infinite;
+  }
+
+  /* The signature mark. A rhombus with a soft interior — used for the logo,
+     for every node on the trace spine, and for the agent's avatar. Drawn with
+     clip-path so it needs no SVG and can carry any background. */
+  .sigil {
+    clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+  }
+}
+
+@layer utilities {
+  /* Transcript rows sit flush so the trace thread running through their
+     gutters stays continuous — the spacing lives inside each row instead. */
+  .trace-flow > * + * {
+    margin-top: 0;
+  }
+}
+
+/* Reduced motion: loops stop, state changes become opacity crossfades.
+   The UI still communicates state — it just stops moving.
+
+   Framer-motion components additionally read `useReducedMotion()` and swap to
+   instant transitions, because a 1ms CSS transition does not reach JS-driven
+   animation. Both halves are needed. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* The working label is painted *by* its animation: the glyphs are
+     transparent and the colour comes from a gradient sliding behind them. The
+     blanket `animation-duration: 1ms` above would therefore freeze it at an
+     arbitrary frame, and a component that renders text no one can read is a
+     worse failure than one that moves. So under reduce it stops being a
+     gradient at all and becomes a plain painted label.
+
+     This is a safety net, not the mechanism: `ShimmerWords` already checks
+     `useMotionOK()` and renders a static label instead. The net matters
+     because that hook reads a JS-side snapshot of the preference, and the
+     cost of the two halves ever disagreeing should be a missing flourish —
+     never invisible words. */
+  .work-shimmer {
+    animation: none !important;
+    background-image: none !important;
+    -webkit-text-fill-color: currentColor;
+    color: rgb(var(--acc) / 0.9);
+  }
+
+  /* Auto orb keeps its glow but stops breathing. */
+  .auto-orb {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+
+  /* The ambient field holds a single composed position. */
+  .field-layer {
+    animation: none !important;
+    transform: none !important;
+  }
+
+  /* The trace spine draws itself instantly and its travelling head is gone —
+     the thread and its nodes remain, because they are structure, not motion. */
+  .trace-head {
+    display: none !important;
+  }
+}

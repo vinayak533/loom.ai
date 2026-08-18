@@ -1,0 +1,349 @@
+/**
+ * Mirror of `backend/app/events.py`. This file and that one are a matched
+ * pair — if you change a `type` string in one, change it in the other.
+ *
+ * Everything the UI animates is keyed off these types. There is no other
+ * channel between the agent and the browser.
+ */
+
+export const PROTOCOL_VERSION = 1;
+
+export type FileNode = {
+  name: string;
+  path: string;
+  type: "dir" | "file";
+  children?: FileNode[];
+};
+
+export type SearchResult = { title: string; url: string; snippet: string };
+
+/** One entry from `git status --porcelain`, already decoded. */
+export type GitChange = {
+  path: string;
+  /** Set only on a rename. */
+  old_path: string | null;
+  /** Label for the index (staged) side, "" when unchanged there. */
+  index: string;
+  /** Label for the worktree side, "" when unchanged there. */
+  worktree: string;
+  staged: boolean;
+  untracked: boolean;
+};
+
+export type GitCommit = {
+  sha: string;
+  short: string;
+  author: string;
+  /** ISO 8601, from `%aI`. */
+  date: string;
+  subject: string;
+};
+
+export type ServerEvent =
+  | { type: "connected"; ts: number; session_id: string; protocol: number }
+  | { type: "pong" }
+  | { type: "agent_thinking_start"; ts: number }
+  | { type: "agent_thinking_delta"; ts: number; content: string }
+  | { type: "agent_thinking_end"; ts: number }
+  | { type: "agent_message_start"; ts: number }
+  | { type: "agent_token"; ts: number; content: string }
+  | { type: "agent_message_end"; ts: number }
+  | {
+      type: "tool_call_start";
+      ts: number;
+      tool: string;
+      input: Record<string, unknown>;
+      call_id: string;
+    }
+  | {
+      type: "tool_output_chunk";
+      ts: number;
+      call_id: string;
+      stream: "stdout" | "stderr";
+      content: string;
+    }
+  | {
+      type: "tool_call_result";
+      ts: number;
+      call_id: string;
+      output: string;
+      success: boolean;
+      meta: { exit_code?: number; results?: SearchResult[] };
+    }
+  | {
+      type: "file_changed";
+      ts: number;
+      path: string;
+      diff: string;
+      content: string;
+      change: "created" | "modified";
+    }
+  | { type: "file_tree"; ts: number; path: string; nodes: FileNode[] }
+  | {
+      type: "git_state";
+      ts: number;
+      /** False when the session has no repository yet. */
+      repo: boolean;
+      branch: string;
+      status: GitChange[];
+      log: GitCommit[];
+      path: string;
+    }
+  | {
+      type: "preview_ready";
+      ts: number;
+      url: string;
+      port: number;
+      command?: string;
+    }
+  | {
+      type: "preview_error";
+      ts: number;
+      message: string;
+      /**
+       * `true` — the server is gone and the iframe shows nothing; drop to the
+       * stopped state. `false` — it is still serving but failed to compile, so
+       * keep the iframe and raise a banner over it.
+       */
+      fatal: boolean;
+      port?: number | null;
+    }
+  | { type: "preview_stopped"; ts: number; port?: number | null; reason?: string }
+  | {
+      type: "usage";
+      ts: number;
+      input_tokens: number;
+      output_tokens: number;
+      cost_estimate: number;
+    }
+  | { type: "agent_done"; ts: number; iterations: number; reason: string }
+  | { type: "max_iterations"; ts: number; iterations: number; message: string }
+  /**
+   * A per-turn tool-call ceiling was reached (a cost control — see
+   * `AgentDef.max_tool_calls_per_turn` on the backend). The run does not end
+   * here: the agent loses its tools and writes up what it has, so this is the
+   * reason the answer that follows is partial.
+   */
+  | {
+      type: "tool_budget_reached";
+      ts: number;
+      agent_name: string;
+      budget: number;
+      used: number;
+      message: string;
+    }
+  | {
+      type: "model_changed";
+      ts: number;
+      model_id: string;
+      name: string;
+      supports_tools: boolean;
+      available: boolean;
+      note?: string;
+      /** "auto" when the router chose this model rather than the user. */
+      routing_mode?: "manual" | "auto";
+      /** The classifier's verdict, e.g. "code_editing". Empty when manual. */
+      routing_hint?: string;
+      /** Human phrasing of the hint, e.g. "code editing". */
+      reason?: string;
+    }
+  | { type: "error"; ts: number; message: string }
+  /* ---------------------------------------------------------------------
+   * The Agentic Loop section only. These travel on /ws/agent/{id} and are
+   * never emitted on the Chat/Code socket, so the reducer branches on them
+   * without any risk to the three existing sections.
+   * ------------------------------------------------------------------- */
+  | {
+      type: "agent_meta";
+      ts: number;
+      agent_id: string;
+      name: string;
+      role: string;
+      icon: string;
+      accent: string;
+      tools: AgentToolMeta[];
+      credits: { balance?: number; enabled?: boolean };
+    }
+  | {
+      type: "agent_paused";
+      ts: number;
+      approval_id: string;
+      agent_id: string;
+      action: string;
+      summary: string;
+      parameters: Record<string, unknown>;
+      risk: "low" | "medium" | "high";
+      /** Parameter names the card lets the user rewrite before approving. */
+      editable: string[];
+      options: Array<{ id: string; label: string; detail: string }>;
+      cost_note?: string;
+      timeout_seconds?: number;
+    }
+  | {
+      type: "agent_resumed";
+      ts: number;
+      approval_id: string;
+      agent_id: string;
+      decision: string;
+    }
+  | {
+      type: "agent_handoff";
+      ts: number;
+      from_agent: string;
+      next_agent: string;
+      next_agent_name: string;
+      reason: string;
+      context?: string;
+    }
+  | {
+      type: "credits";
+      ts: number;
+      balance: number;
+      spent_this_turn: number;
+      enabled: boolean;
+    };
+
+/** One agent tool, as the backend reports it. Never carries a key value. */
+export type AgentToolMeta = {
+  name: string;
+  summary: string;
+  /** Always "real" — prompt-engineered capabilities are listed separately. */
+  kind: "real";
+  configured: boolean;
+  requires_key: string | null;
+  /** Configured, but working from a fallback because its key is absent. */
+  degraded_without_key?: boolean;
+  without_it: string | null;
+  /**
+   * Extra credits per call, on top of the turn's model cost. `null` when the
+   * server cannot price the tool — today that means an image model with no
+   * published rate, which the tool itself refuses to run rather than billing a
+   * guess. Falsy either way, so a `> 0` check reads correctly.
+   */
+  credit_surcharge: number | null;
+};
+
+export type ClientEvent =
+  | { type: "user_message"; content: string; file_ids?: string[] }
+  /** `model_id: "auto"` selects the routing mode rather than a model. */
+  | { type: "set_model"; model_id: string }
+  | { type: "cancel" }
+  | { type: "ping" }
+  /**
+   * Answers a paused run. Agents section only. `parameters` is read for
+   * "edited" and only the keys present are applied, so a card that exposes
+   * two of five fields cannot blank the other three.
+   */
+  | {
+      type: "approval_resolve";
+      approval_id: string;
+      decision: "approved" | "edited" | "rejected";
+      parameters?: Record<string, unknown>;
+    };
+
+/** Human labels for tool names, used in `ToolCallCard` headers. */
+export const TOOL_LABEL: Record<string, string> = {
+  bash_execute: "Terminal",
+  read_file: "Read",
+  write_file: "Write",
+  edit_file: "Edit",
+  list_files: "List files",
+  web_search: "Web search",
+  start_dev_server: "Dev server",
+  stop_dev_server: "Stop server",
+  // The Agentic Loop's tools. In the same map as the rest because the tool
+  // card is one component: a second label table would be a second place to
+  // forget to add a tool.
+  parse_source: "Parse source",
+  chunk_document: "Chunk",
+  count_tokens: "Count tokens",
+  list_email_templates: "Template",
+  score_subject_line: "Score subject",
+  check_spam_words: "Spam check",
+  send_email: "Send email",
+  lookup_tailwind: "Tailwind",
+  lookup_lucide_icons: "Lucide icons",
+  normalize_aspect_ratio: "Aspect ratio",
+  list_style_modifiers: "Style terms",
+  generate_image: "Generate image",
+  resize_image: "Resize",
+  search_web: "Web search",
+  read_url: "Read page",
+  rank_domain_trust: "Source trust",
+  keyword_density: "Keyword density",
+  readability_score: "Readability",
+  validate_json_schema: "Validate schema",
+  match_patterns: "Match patterns",
+  evaluate_conditions: "Evaluate rules",
+  route_to_agent: "Route",
+  request_approval: "Approval",
+  list_pending_approvals: "Pending approvals",
+  lint_code: "Lint",
+  parse_ast: "Parse AST",
+  run_code: "Run",
+};
+
+/** The single most informative argument for each tool, shown in the card header. */
+export function toolSubtitle(tool: string, input: Record<string, unknown>): string {
+  switch (tool) {
+    case "bash_execute":
+      return String(input.command ?? "");
+    case "web_search":
+    case "search_web":
+      return String(input.query ?? "");
+    case "start_dev_server":
+      return input.port ? `${input.command} · :${input.port}` : String(input.command ?? "");
+    case "stop_dev_server":
+    case "list_pending_approvals":
+      return "";
+    case "read_url":
+      return String(input.url ?? "");
+    case "count_tokens":
+    case "chunk_document":
+    case "readability_score":
+      // These take a whole document. Its length is the informative part; the
+      // first eighty characters of prose tell you nothing about the call.
+      return `${String(input.text ?? "").length.toLocaleString()} chars`;
+    case "keyword_density":
+      return asList(input.keywords);
+    case "lookup_lucide_icons":
+      return String(input.query ?? "") || asList(input.names);
+    case "lookup_tailwind":
+      return String(input.query ?? "") || asList(input.classes);
+    case "normalize_aspect_ratio":
+      return String(input.value ?? "");
+    case "list_style_modifiers":
+      return String(input.category ?? "all categories");
+    case "list_email_templates":
+      return String(input.audience ?? "all audiences");
+    case "score_subject_line":
+      return String(input.subject ?? "");
+    case "send_email":
+      return `${asList(input.to)} — ${String(input.subject ?? "")}`;
+    case "generate_image":
+      return String(input.prompt ?? "");
+    case "resize_image":
+      return [input.width, input.height].filter(Boolean).join("×") || String(input.asset_id ?? "");
+    case "rank_domain_trust":
+      return asList(input.urls);
+    case "route_to_agent":
+      return String(input.next_agent ?? "");
+    case "request_approval":
+      return String(input.summary ?? input.action ?? "");
+    case "match_patterns":
+      return `${String(input.text ?? "").length.toLocaleString()} chars`;
+    case "lint_code":
+    case "parse_ast":
+    case "run_code":
+      return `${String(input.language ?? "python")} · ${String(input.code ?? "").split("\n").length} lines`;
+    case "parse_source":
+      return String(input.url ?? input.file_id ?? "pasted text");
+    default:
+      return String(input.path ?? "");
+  }
+}
+
+function asList(value: unknown): string {
+  if (Array.isArray(value)) return value.slice(0, 3).map(String).join(", ");
+  return value === undefined || value === null ? "" : String(value);
+}

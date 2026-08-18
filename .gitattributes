@@ -1,0 +1,17 @@
+# Normalise line endings in the repository. Without this, a checkout on
+# Windows and one on Linux disagree about every line of every text file, and
+# the first cross-platform commit reads as a whole-tree rewrite.
+* text=auto eol=lf
+
+# Binary assets git must not try to normalise or diff as text.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.pdf  binary
+*.sqlite binary
+
+# Generated: collapse in diffs and reviews, but still tracked.
+frontend/package-lock.json linguist-generated=true -diff

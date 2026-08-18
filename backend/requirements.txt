@@ -1,0 +1,36 @@
+# --- Web framework ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+websockets>=13.0
+python-multipart>=0.0.12
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+python-dotenv>=1.0.1
+
+# --- Agent orchestration ---
+langgraph>=0.2.60
+langgraph-checkpoint-sqlite>=2.0.0
+aiosqlite>=0.20.0
+
+# --- LLMs ---
+# The OpenAI *client library* only — no OpenAI model is used or reachable.
+# It is the HTTP/SSE client for every provider that speaks the
+# OpenAI-compatible wire format: xAI, OpenRouter, Groq, OpenCode.
+openai>=1.55.0
+
+# --- Tools ---
+e2b>=1.0.0              # sandboxed bash + filesystem
+exa-py>=1.7.0           # AI-native web search
+
+# --- Agentic Loop (the ten specialist agents) ---
+# Tavily, Jina Reader, Stability and Resend are all called over plain HTTP via
+# httpx below — no vendor SDK is needed for any of them, and four more
+# dependencies to wrap four POST requests would not earn their keep.
+tiktoken>=0.8.0         # Agent 1: real token counts (cl100k_base vocabulary)
+pillow>=11.0.0          # Agent 5: post-generation image resizing
+
+# --- Data ---
+supabase>=2.10.0
+pypdf>=5.1.0            # Learn: PDF text layer -> chunks. No OCR.
+
+httpx>=0.27.0

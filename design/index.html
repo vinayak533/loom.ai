@@ -1,0 +1,1778 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Atlas — multi-mode assistant · design prototype</title>
+<style>
+/* ============================================================
+   ATLAS DESIGN SYSTEM
+   Dark-only. Material 3 elevation logic (tonal, not shadow-led).
+   ============================================================ */
+
+/* ---------- 1. TOKENS: base surfaces, text, lines, motion ---------- */
+:root{
+  /* Surface ramp — elevation = tone shift first, shadow second */
+  --s-0:#0F0F10;            /* app canvas            */
+  --s-1:#141517;            /* sidebar / rail        */
+  --s-2:#1A1B1E;            /* cards, composer       */
+  --s-3:#212327;            /* hover, raised card    */
+  --s-4:#292B30;            /* popover, menu         */
+  --s-inset:#0B0B0C;        /* wells: code, visor    */
+
+  /* Text — all ≥ 4.5:1 on --s-0 (verified) */
+  --tx-hi:#EDEEF0;          /* 16.5:1  body + headings */
+  --tx-mid:#A9ADB5;         /*  8.5:1  secondary       */
+  --tx-low:#7C8089;         /*  4.8:1  meta, captions  */
+  --tx-dis:#4E5158;         /*  disabled — non-text only */
+
+  /* Hairlines — never a hard 1px white border */
+  --line:rgba(255,255,255,.055);
+  --line-2:rgba(255,255,255,.10);
+
+  /* Shadow ramp — soft, wide, low-opacity */
+  --e-1:0 1px 2px rgba(0,0,0,.45);
+  --e-2:0 4px 14px -4px rgba(0,0,0,.55), 0 1px 2px rgba(0,0,0,.4);
+  --e-3:0 16px 40px -12px rgba(0,0,0,.72), 0 2px 8px rgba(0,0,0,.45);
+
+  /* Neutral brand — used by LOGIN surface only */
+  --brand:#8AA9FF;
+  --brand-ink:#0A0E1C;
+
+  /* Radius — overridden per section */
+  --r-card:16px;
+  --r-ctl:8px;
+  --r-pill:999px;
+
+  /* Spacing — 4px base */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-6:24px; --sp-8:32px;
+
+  /* Type scale */
+  --t-12:12px; --t-14:14px; --t-16:16px; --t-20:20px; --t-24:24px; --t-32:32px;
+
+  /* Motion */
+  --dur-fast:150ms; --dur:200ms; --dur-slow:250ms;
+  --ease:cubic-bezier(.2,0,0,1);          /* ease-out, M3 emphasized-decel */
+  --ease-io:cubic-bezier(.4,0,.2,1);
+
+  --rail:264px;
+  --font:"Google Sans","Inter","Söhne",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --mono:"JetBrains Mono","SF Mono","Roboto Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+
+/* ---------- 2. TOKENS: per-section accent identity ---------- */
+/* Each section inherits the base ramp. Only accent / radius / icon weight shift. */
+
+[data-section="chat"]{
+  --acc:#8AA9FF;                       /* 8.4:1 on --s-0 */
+  --acc-2:#B190FF;
+  --acc-grad:linear-gradient(135deg,#8AA9FF 0%,#B190FF 100%);
+  --acc-ink:#0A0E1C;
+  --acc-soft:rgba(138,169,255,.11);
+  --acc-line:rgba(138,169,255,.24);
+  --acc-ring:rgba(138,169,255,.42);
+  --acc-glow:rgba(138,169,255,.30);
+  --r-card:16px; --r-ctl:8px; --r-bubble:18px;
+  --icon-w:1.75;                       /* rounded, friendly stroke */
+  --icon-cap:round;
+}
+[data-section="learning"]{
+  --acc:#F0B54A;                       /* 10.4:1 */
+  --acc-2:#3BC9B4;                     /*  9.3:1 */
+  --acc-grad:linear-gradient(135deg,#F0B54A 0%,#3BC9B4 100%);
+  --acc-ink:#1B1405;
+  --acc-soft:rgba(240,181,74,.10);
+  --acc-line:rgba(240,181,74,.24);
+  --acc-ring:rgba(240,181,74,.42);
+  --acc-glow:rgba(240,181,74,.30);
+  --r-card:16px; --r-ctl:8px; --r-bubble:18px;
+  --icon-w:1.75;
+  --icon-cap:round;
+}
+[data-section="code"]{
+  --acc:#5BE0A0;                       /* 11.5:1 */
+  --acc-2:#54D2E8;                     /* 10.7:1 */
+  --acc-grad:linear-gradient(135deg,#5BE0A0 0%,#54D2E8 100%);
+  --acc-ink:#04140C;
+  --acc-soft:rgba(91,224,160,.09);
+  --acc-line:rgba(91,224,160,.22);
+  --acc-ring:rgba(91,224,160,.40);
+  --acc-glow:rgba(91,224,160,.28);
+  --r-card:8px; --r-ctl:6px; --r-bubble:10px;   /* sharper, technical */
+  --icon-w:1.6;                                  /* tighter, angular   */
+  --icon-cap:butt;
+}
+
+/* Syntax palette (code section wells) */
+:root{
+  --syn-key:#7BD8F0; --syn-str:#9BE3A8; --syn-num:#F0B54A;
+  --syn-fn:#8AA9FF;  --syn-com:#666B74; --syn-pun:#8E949E;
+}
+
+/* ---------- 3. RESET ---------- */
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--s-0); color:var(--tx-hi);
+  font-family:var(--font); font-size:var(--t-14); line-height:1.55;
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  overflow:hidden;
+}
+button,input,textarea{font:inherit;color:inherit}
+button{background:none;border:0;cursor:pointer}
+svg{display:block}
+:focus{outline:none}
+:focus-visible{
+  outline:none;
+  box-shadow:0 0 0 2px var(--s-0), 0 0 0 4px var(--acc-ring);
+  border-radius:inherit;
+}
+::selection{background:var(--acc-soft);color:var(--tx-hi)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#2C2E33;border:3px solid transparent;background-clip:content-box;border-radius:99px}
+::-webkit-scrollbar-thumb:hover{background:#3A3D43;background-clip:content-box}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ============================================================
+   4. APP SHELL
+   ============================================================ */
+.app{display:flex;height:100dvh;overflow:hidden}
+
+/* ---------- SIDEBAR ---------- */
+.sidebar{
+  width:var(--rail); flex:0 0 var(--rail);
+  background:var(--s-1);
+  border-right:1px solid var(--line);
+  display:flex; flex-direction:column;
+  padding:var(--sp-3);
+  transition:width var(--dur-slow) var(--ease), flex-basis var(--dur-slow) var(--ease);
+  z-index:40;
+}
+.sb-head{display:flex;align-items:center;gap:var(--sp-2);height:40px;padding:0 var(--sp-2);margin-bottom:var(--sp-3)}
+.mark{
+  width:26px;height:26px;flex:0 0 26px;border-radius:9px;
+  background:var(--acc-grad);
+  display:grid;place-items:center;
+  transition:background var(--dur-slow) var(--ease);
+}
+.mark svg{width:15px;height:15px;color:#0B0C10}
+.wordmark{font-size:var(--t-16);font-weight:600;letter-spacing:-.01em;white-space:nowrap}
+.sb-head .icon-btn{margin-left:auto}
+
+/* New Chat */
+.new-chat{
+  display:flex;align-items:center;gap:10px;
+  height:42px;padding:0 var(--sp-3);
+  border-radius:var(--r-ctl);
+  background:var(--s-3);
+  color:var(--tx-hi);font-size:var(--t-14);font-weight:500;
+  box-shadow:var(--e-1);
+  transition:background var(--dur) var(--ease),transform var(--dur-fast) var(--ease),box-shadow var(--dur) var(--ease);
+}
+.new-chat svg{width:18px;height:18px;flex:0 0 18px;color:var(--acc);transition:color var(--dur-slow) var(--ease)}
+.new-chat:hover{background:var(--s-4);box-shadow:var(--e-2)}
+.new-chat:active{transform:scale(.985);background:var(--s-3)}
+
+/* Nav */
+.nav,.recents{display:flex;flex-direction:column;gap:2px;margin-top:var(--sp-6)}
+.nav-label{
+  margin:0 0 var(--sp-2);padding:0 var(--sp-3);
+  font-size:var(--t-12);font-weight:500;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--tx-low);
+}
+.nav-item{
+  position:relative;display:flex;align-items:center;gap:12px;
+  height:40px;padding:0 var(--sp-3);border-radius:var(--r-ctl);
+  color:var(--tx-mid);font-size:var(--t-14);font-weight:500;
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease),transform var(--dur-fast) var(--ease);
+}
+.nav-item svg{width:19px;height:19px;flex:0 0 19px;transition:color var(--dur) var(--ease)}
+.nav-item span{white-space:nowrap}
+.nav-item:hover{background:var(--s-2);color:var(--tx-hi)}
+.nav-item:active{transform:scale(.985)}
+.nav-item[aria-current="page"]{background:var(--nav-soft);color:var(--tx-hi)}
+.nav-item[aria-current="page"] svg{color:var(--nav-acc)}
+.nav-item[aria-current="page"]::before{
+  content:"";position:absolute;left:0;top:50%;translate:0 -50%;
+  width:3px;height:18px;border-radius:0 3px 3px 0;background:var(--nav-acc);
+}
+/* Each nav row carries its own accent so identity reads before you click */
+.nav-item[data-go="chat"]    {--nav-acc:#8AA9FF;--nav-soft:rgba(138,169,255,.11)}
+.nav-item[data-go="learning"]{--nav-acc:#F0B54A;--nav-soft:rgba(240,181,74,.10)}
+.nav-item[data-go="code"]    {--nav-acc:#5BE0A0;--nav-soft:rgba(91,224,160,.09)}
+
+/* Recents */
+.recents{flex:1;min-height:0;overflow-y:auto;margin-top:var(--sp-6)}
+.rec{
+  display:block;height:34px;line-height:34px;padding:0 var(--sp-3);
+  border-radius:var(--r-ctl);color:var(--tx-mid);font-size:var(--t-14);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  text-decoration:none;
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.rec:hover{background:var(--s-2);color:var(--tx-hi)}
+
+/* ---------- 4b. LOGIN / ACCOUNT (neutral accent) ---------- */
+.account{position:relative;margin-top:var(--sp-3);padding-top:var(--sp-3);border-top:1px solid var(--line)}
+.acct-btn{
+  display:flex;align-items:center;gap:10px;width:100%;
+  padding:var(--sp-2);border-radius:var(--r-ctl);
+  transition:background var(--dur) var(--ease);
+}
+.acct-btn:hover{background:var(--s-2)}
+.acct-btn[aria-expanded="true"]{background:var(--s-3)}
+.avatar{
+  position:relative;width:30px;height:30px;flex:0 0 30px;border-radius:var(--r-pill);
+  display:grid;place-items:center;
+  background:#33363C;color:var(--tx-hi);
+  font-size:var(--t-12);font-weight:600;letter-spacing:.02em;
+}
+.status-dot{
+  position:absolute;right:-1px;bottom:-1px;width:9px;height:9px;border-radius:var(--r-pill);
+  background:#3BC98A;box-shadow:0 0 0 2.5px var(--s-1);
+  transition:box-shadow var(--dur) var(--ease);
+}
+.acct-btn:hover .status-dot{box-shadow:0 0 0 2.5px var(--s-2)}
+.acct-meta{display:flex;flex-direction:column;align-items:flex-start;min-width:0;line-height:1.35}
+.acct-name{font-size:var(--t-14);font-weight:500;color:var(--tx-hi);white-space:nowrap}
+.acct-sub{font-size:var(--t-12);color:var(--tx-low);white-space:nowrap}
+.acct-btn .chev{width:16px;height:16px;margin-left:auto;color:var(--tx-low);transition:transform var(--dur) var(--ease)}
+.acct-btn[aria-expanded="true"] .chev{transform:rotate(180deg)}
+
+.acct-pop{
+  position:absolute;left:0;bottom:calc(100% + 8px);width:252px;
+  background:var(--s-4);border:1px solid var(--line);border-radius:14px;
+  box-shadow:var(--e-3);padding:var(--sp-2);
+  opacity:0;transform:translateY(6px) scale(.98);transform-origin:bottom left;
+  pointer-events:none;
+  transition:opacity var(--dur) var(--ease),transform var(--dur) var(--ease);
+  z-index:60;
+}
+.acct-pop.open{opacity:1;transform:none;pointer-events:auto}
+.pop-head{display:flex;gap:10px;align-items:center;padding:var(--sp-2) var(--sp-2) var(--sp-3)}
+.pop-head .avatar{width:36px;height:36px;flex:0 0 36px;font-size:var(--t-14)}
+.pop-head .status-dot{box-shadow:0 0 0 2.5px var(--s-4)}
+.pop-mail{font-size:var(--t-12);color:var(--tx-low)}
+.pop-sep{height:1px;background:var(--line);margin:var(--sp-1) 0}
+.pop-item{
+  display:flex;align-items:center;gap:10px;width:100%;
+  height:36px;padding:0 var(--sp-2);border-radius:var(--r-ctl);
+  color:var(--tx-mid);font-size:var(--t-14);
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.pop-item svg{width:17px;height:17px;flex:0 0 17px}
+.pop-item:hover{background:rgba(255,255,255,.055);color:var(--tx-hi)}
+.pop-item .kbd{margin-left:auto;font-size:var(--t-12);color:var(--tx-dis);font-family:var(--mono)}
+.pop-cta{
+  display:flex;align-items:center;justify-content:center;gap:8px;width:100%;
+  height:38px;margin-top:var(--sp-2);border-radius:var(--r-ctl);
+  background:var(--brand);color:var(--brand-ink);font-size:var(--t-14);font-weight:600;
+  transition:filter var(--dur) var(--ease),transform var(--dur-fast) var(--ease);
+}
+.pop-cta:hover{filter:brightness(1.08)}
+.pop-cta:active{transform:scale(.985);filter:brightness(.96)}
+
+/* ---------- 5. MAIN ---------- */
+.main{flex:1;min-width:0;display:flex;flex-direction:column;position:relative}
+.topbar{
+  height:56px;flex:0 0 56px;display:flex;align-items:center;gap:var(--sp-2);
+  padding:0 var(--sp-4);border-bottom:1px solid transparent;
+  transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease);
+}
+.main[data-scrolled="1"] .topbar{border-bottom-color:var(--line);background:rgba(15,15,16,.72);backdrop-filter:blur(12px)}
+.icon-btn{
+  width:34px;height:34px;display:grid;place-items:center;border-radius:var(--r-ctl);
+  color:var(--tx-mid);
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease),transform var(--dur-fast) var(--ease);
+}
+.icon-btn svg{width:18px;height:18px}
+.icon-btn:hover{background:var(--s-2);color:var(--tx-hi)}
+.icon-btn:active{transform:scale(.94)}
+.crumb{display:flex;align-items:center;gap:9px;font-size:var(--t-14);font-weight:500}
+.mode-dot{width:7px;height:7px;border-radius:var(--r-pill);background:var(--acc);transition:background var(--dur-slow) var(--ease)}
+.spacer{flex:1}
+.chip{
+  display:flex;align-items:center;gap:7px;height:32px;padding:0 12px;
+  border-radius:var(--r-pill);background:var(--s-2);
+  color:var(--tx-mid);font-size:var(--t-12);font-weight:500;
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.chip:hover{background:var(--s-3);color:var(--tx-hi)}
+
+/* Stage / thread */
+.stage{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scroll-behavior:smooth}
+.col{max-width:760px;margin:0 auto;padding:var(--sp-6) var(--sp-6) var(--sp-8);width:100%}
+/* extra bottom padding clears the mascot's perch — Code only */
+[data-section="code"] .col{padding-bottom:96px}
+[data-section="code"] .col{max-width:860px}
+
+/* When empty, the dock becomes the hero and floats to optical center */
+.main[data-empty="1"] .stage{flex:0 1 auto;overflow:visible}
+.main[data-empty="1"]{justify-content:center}
+
+/* ---------- 6. GREETING (empty state) ---------- */
+.hero{max-width:760px;margin:0 auto var(--sp-6);padding:0 var(--sp-6);width:100%}
+.main[data-empty="0"] .hero,
+.main[data-empty="0"] .suggest{display:none}
+.greet{
+  margin:0 0 var(--sp-2);font-size:var(--t-32);font-weight:500;letter-spacing:-.02em;line-height:1.2;
+}
+.greet .accent{
+  background:var(--acc-grad);-webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.greet-sub{margin:0;font-size:var(--t-16);color:var(--tx-mid);max-width:46ch}
+/* reserve the mascot's perch so the greeting never runs under it — Code only */
+[data-section="code"] .main[data-empty="1"] .hero{padding-right:calc(var(--sp-6) + 112px)}
+
+/* ---------- 7. DOCK: mascot + composer ---------- */
+.dock{flex:0 0 auto;padding:0 var(--sp-6) var(--sp-4);position:relative}
+/* soft fade so scrolled content dissolves into the dock instead of colliding */
+.dock::before{
+  content:"";position:absolute;left:0;right:0;bottom:100%;height:40px;
+  background:linear-gradient(to top,var(--s-0),transparent);
+  pointer-events:none;opacity:0;transition:opacity var(--dur) var(--ease);
+}
+.main[data-empty="0"] .dock::before{opacity:1}
+.dock-inner{max-width:760px;margin:0 auto;position:relative}
+[data-section="code"] .dock-inner{max-width:860px}
+
+.composer{
+  position:relative;
+  background:var(--s-2);
+  border:1px solid var(--line);
+  border-radius:var(--r-card);
+  box-shadow:var(--e-2);
+  padding:var(--sp-3) var(--sp-3) var(--sp-2);
+  transition:border-color var(--dur) var(--ease),box-shadow var(--dur) var(--ease),
+             background var(--dur) var(--ease),border-radius var(--dur-slow) var(--ease);
+}
+.composer:hover{border-color:var(--line-2)}
+.composer:focus-within{
+  border-color:var(--acc-line);
+  box-shadow:var(--e-2), 0 0 0 3px var(--acc-soft);
+}
+.composer textarea{
+  display:block;width:100%;border:0;background:none;resize:none;
+  font-size:var(--t-16);line-height:1.6;color:var(--tx-hi);
+  min-height:26px;max-height:180px;padding:2px 2px 0;
+}
+.composer textarea::placeholder{color:var(--tx-low)}
+[data-section="code"] .composer textarea{font-family:var(--mono);font-size:var(--t-14)}
+.composer-row{display:flex;align-items:center;gap:var(--sp-1);margin-top:var(--sp-2)}
+/* controls scoped to a single section — specificity must beat .tool-btn below */
+.composer-row .only-learning{display:none}
+[data-section="learning"] .composer-row .only-learning{display:flex}
+.tool-btn{
+  display:flex;align-items:center;gap:7px;height:32px;padding:0 10px;border-radius:var(--r-ctl);
+  color:var(--tx-low);font-size:var(--t-12);font-weight:500;
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.tool-btn svg{width:16px;height:16px}
+.tool-btn:hover{background:var(--s-3);color:var(--tx-hi)}
+.tool-btn[aria-pressed="true"]{background:var(--acc-soft);color:var(--acc)}
+.send{
+  margin-left:auto;width:34px;height:34px;border-radius:var(--r-ctl);
+  display:grid;place-items:center;
+  background:var(--s-3);color:var(--tx-dis);
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease),
+             transform var(--dur-fast) var(--ease),opacity var(--dur) var(--ease);
+}
+.send svg{width:17px;height:17px}
+.send:disabled{cursor:not-allowed;opacity:.55}
+.composer.armed .send{background:var(--acc-grad);color:var(--acc-ink)}
+.composer.armed .send:hover{filter:brightness(1.08)}
+.composer.armed .send:active{transform:scale(.92)}
+.disclaimer{margin:10px 0 0;text-align:center;font-size:var(--t-12);color:var(--tx-dis)}
+
+/* Suggestions */
+.suggest{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-4);justify-content:center}
+.sug{
+  display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;
+  border-radius:var(--r-pill);background:var(--s-2);border:1px solid var(--line);
+  color:var(--tx-mid);font-size:var(--t-14);
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease),
+             border-color var(--dur) var(--ease),transform var(--dur-fast) var(--ease);
+}
+[data-section="code"] .sug{border-radius:var(--r-ctl);font-family:var(--mono);font-size:var(--t-12)}
+.sug svg{width:15px;height:15px;color:var(--acc)}
+.sug:hover{background:var(--s-3);color:var(--tx-hi);border-color:var(--acc-line)}
+.sug:active{transform:scale(.98)}
+
+/* ---------- 8. MESSAGES ---------- */
+.msg{display:flex;gap:14px;margin-bottom:var(--sp-6);animation:msgIn 260ms var(--ease) both}
+@keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.msg.user{justify-content:flex-end}
+.bubble{
+  max-width:78%;padding:11px 16px;border-radius:var(--r-bubble);
+  font-size:var(--t-16);line-height:1.65;
+}
+.msg.user .bubble{background:var(--s-3);border-bottom-right-radius:6px;color:var(--tx-hi)}
+/* wrapper so an attached-source chip doesn't squeeze the bubble below it */
+.msg.user > div{display:flex;flex-direction:column;align-items:flex-end;max-width:78%}
+.msg.user > div .bubble{max-width:100%}
+.msg.ai .bubble{max-width:100%;padding:0;background:none}
+.ai-avatar{
+  width:28px;height:28px;flex:0 0 28px;border-radius:var(--r-pill);
+  background:var(--acc-soft);border:1px solid var(--acc-line);
+  display:grid;place-items:center;margin-top:2px;
+}
+.ai-avatar svg{width:15px;height:15px;color:var(--acc)}
+.msg.ai p{margin:0 0 var(--sp-3)}
+.msg.ai p:last-child{margin-bottom:0}
+.cursor{display:inline-block;width:7px;height:16px;translate:0 2px;background:var(--acc);border-radius:1px;animation:blink 1s steps(2,end) infinite}
+@keyframes blink{50%{opacity:0}}
+
+/* ---------- 9. LEARNING blocks ---------- */
+.lesson-head{display:flex;align-items:center;gap:14px;padding:var(--sp-4);background:var(--s-2);border-radius:var(--r-card);margin-bottom:var(--sp-4)}
+.ring{width:44px;height:44px;flex:0 0 44px}
+.ring circle{fill:none;stroke-width:4;stroke-linecap:round}
+.ring .track{stroke:rgba(255,255,255,.08)}
+.ring .bar{stroke:var(--acc);transform:rotate(-90deg);transform-origin:50% 50%;
+  stroke-dasharray:113;stroke-dashoffset:113;animation:ringFill 900ms var(--ease) 120ms forwards}
+@keyframes ringFill{to{stroke-dashoffset:45}}
+.lesson-title{font-size:var(--t-16);font-weight:600;margin:0}
+.lesson-meta{font-size:var(--t-12);color:var(--tx-low);margin:2px 0 0}
+.pill{margin-left:auto;display:flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:var(--r-pill);
+  background:var(--acc-soft);color:var(--acc);font-size:var(--t-12);font-weight:600}
+
+.step{border:1px solid var(--line);border-radius:var(--r-card);background:var(--s-2);margin-bottom:var(--sp-2);overflow:hidden;
+  transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease)}
+.step:hover{border-color:var(--line-2)}
+.step[open]{background:var(--s-2)}
+.step summary{
+  display:flex;align-items:center;gap:12px;padding:var(--sp-3) var(--sp-4);cursor:pointer;list-style:none;
+  font-size:var(--t-14);font-weight:500;
+}
+.step summary::-webkit-details-marker{display:none}
+.step .tick{width:20px;height:20px;flex:0 0 20px;border-radius:var(--r-pill);
+  border:1.75px solid var(--line-2);display:grid;place-items:center;color:transparent;
+  transition:border-color var(--dur) var(--ease),background var(--dur) var(--ease),color var(--dur) var(--ease)}
+.step[data-done="1"] .tick{background:var(--acc);border-color:var(--acc);color:var(--acc-ink)}
+.step .tick svg{width:12px;height:12px}
+.step .caret{margin-left:auto;width:16px;height:16px;color:var(--tx-low);transition:transform var(--dur) var(--ease)}
+.step[open] .caret{transform:rotate(180deg)}
+.step-body{padding:0 var(--sp-4) var(--sp-4) 46px;font-size:var(--t-14);color:var(--tx-mid);line-height:1.7}
+.diagram{margin-top:var(--sp-3);padding:var(--sp-4);background:var(--s-inset);border-radius:12px;border:1px solid var(--line)}
+.diagram-cap{margin:var(--sp-3) 0 0;font-size:var(--t-12);color:var(--tx-low);text-align:center}
+
+/* ---------- 10. CODE blocks ---------- */
+.codeblock{
+  background:var(--s-inset);border:1px solid var(--line);border-radius:var(--r-card);
+  overflow:hidden;margin:var(--sp-3) 0;
+}
+.cb-head{
+  display:flex;align-items:center;gap:9px;height:38px;padding:0 var(--sp-3);
+  background:var(--s-2);border-bottom:1px solid var(--line);
+}
+.cb-dot{width:7px;height:7px;background:var(--acc);border-radius:1.5px}
+.cb-name{font-family:var(--mono);font-size:var(--t-12);color:var(--tx-mid)}
+.cb-lang{font-family:var(--mono);font-size:11px;color:var(--tx-low);padding:2px 6px;border-radius:4px;background:rgba(255,255,255,.05)}
+.cb-copy{
+  margin-left:auto;display:flex;align-items:center;gap:6px;height:26px;padding:0 9px;border-radius:var(--r-ctl);
+  color:var(--tx-low);font-size:var(--t-12);font-family:var(--mono);
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.cb-copy svg{width:14px;height:14px}
+.cb-copy:hover{background:rgba(255,255,255,.06);color:var(--tx-hi)}
+.cb-copy.ok{color:var(--acc)}
+.cb-body{display:flex;font-family:var(--mono);font-size:13px;line-height:1.75;overflow-x:auto}
+.gutter{
+  flex:0 0 auto;padding:var(--sp-3) 0 var(--sp-3) var(--sp-3);
+  color:#4A4E56;text-align:right;user-select:none;min-width:44px;padding-right:12px;
+  border-right:1px solid var(--line);
+}
+.code{padding:var(--sp-3) var(--sp-4);white-space:pre;color:var(--tx-hi);flex:1}
+.k{color:var(--syn-key)} .s{color:var(--syn-str)} .n{color:var(--syn-num)}
+.f{color:var(--syn-fn)}  .c{color:var(--syn-com);font-style:italic} .p{color:var(--syn-pun)}
+
+/* ============================================================
+   11. MASCOT — "BIT"
+   Shared silhouette, per-section props, 3 named states.
+   Animates transform + opacity only.
+   ============================================================ */
+/* CODE SECTION ONLY. Chat and Learning use the .proc dot cluster instead. */
+.mascot{
+  display:none;
+  position:absolute; right:44px; bottom:100%;
+  width:64px;height:82px;
+  margin-bottom:-16px;              /* props overlap the composer edge */
+  pointer-events:none; z-index:5;
+  transition:width var(--dur-slow) var(--ease),height var(--dur-slow) var(--ease),
+             right var(--dur-slow) var(--ease),margin-bottom var(--dur-slow) var(--ease);
+}
+[data-section="code"] .mascot{display:block}
+.main[data-empty="1"] .mascot{width:96px;height:122px;right:36px;margin-bottom:-22px}
+.mascot svg{
+  position:absolute;inset:0;width:100%;height:100%;
+  opacity:0;transition:opacity var(--dur-slow) var(--ease-io);
+}
+[data-section="code"] .mascot .v-code{opacity:1}
+
+/* SVG transform hygiene */
+.mascot [class^="m-"],.mascot [class*=" m-"]{transform-box:view-box;transform-origin:50px 70px}
+
+/* --- shared parts --- */
+.m-shell{fill:#C9CDD6}
+.m-shell-2{fill:#9AA0AC}
+.m-visor{fill:#0B0C0E}
+.m-eye{fill:var(--acc);filter:drop-shadow(0 0 3px var(--acc-glow))}
+.m-mouth{stroke:var(--acc);stroke-width:2.2;stroke-linecap:round;fill:none;opacity:.85}
+.m-bulb{fill:var(--acc);filter:drop-shadow(0 0 4px var(--acc-glow))}
+.m-stalk{stroke:#9AA0AC;stroke-width:2.6;stroke-linecap:round}
+.m-panel{fill:var(--acc);opacity:.22}
+
+/* --- IDLE: breathing bob --- */
+@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+.mascot .m-rig{animation:bob 2.8s var(--ease-io) infinite}
+
+/* --- THINKING --- */
+@keyframes leanIn{to{transform:translateY(2px) rotate(7deg)}}
+@keyframes eyePulse{0%,100%{opacity:.6}50%{opacity:1}}
+@keyframes dotRise{
+  0%{opacity:0;transform:translateY(4px) scale(.5)}
+  30%{opacity:1;transform:translateY(-2px) scale(1)}
+  70%{opacity:.9;transform:translateY(-6px) scale(1)}
+  100%{opacity:0;transform:translateY(-12px) scale(.6)}
+}
+.m-think{opacity:0;transition:opacity var(--dur) var(--ease)}
+.mascot[data-state="thinking"] .m-rig{animation:bob 2.8s var(--ease-io) infinite, leanIn 300ms var(--ease-io) forwards}
+.mascot[data-state="thinking"] .m-eye{animation:eyePulse 800ms var(--ease-io) infinite}
+.mascot[data-state="thinking"] .m-think{opacity:1}
+.mascot[data-state="thinking"] .m-dot{animation:dotRise 1.4s var(--ease-io) infinite}
+.mascot[data-state="thinking"] .m-dot:nth-child(2){animation-delay:.22s}
+.mascot[data-state="thinking"] .m-dot:nth-child(3){animation-delay:.44s}
+
+/* --- ANSWERING --- */
+@keyframes sparkPop{
+  0%{opacity:0;transform:scale(.3) rotate(-18deg)}
+  35%{opacity:1;transform:scale(1.15) rotate(0deg)}
+  100%{opacity:0;transform:scale(.85) rotate(10deg)}
+}
+@keyframes eyeFlash{0%{transform:scale(1)}40%{transform:scale(1.55)}100%{transform:scale(1)}}
+@keyframes straighten{0%{transform:rotate(7deg)}55%{transform:rotate(-3deg)}100%{transform:rotate(0)}}
+.m-spark{opacity:0;transform-origin:50px 4px}
+.mascot[data-state="answering"] .m-rig{animation:bob 2.8s var(--ease-io) infinite, straighten 320ms var(--ease) forwards}
+.mascot[data-state="answering"] .m-spark{animation:sparkPop 400ms var(--ease) forwards}
+.mascot[data-state="answering"] .m-eye{animation:eyeFlash 300ms var(--ease)}
+.mascot[data-state="answering"] .m-mouth{opacity:1}
+
+/* --- CODE variant --- */
+.m-head{transform-origin:50px 62px;transition:transform 300ms var(--ease-io)}
+.m-desk{fill:#26282D} .m-chair{fill:#33363C}
+.m-lap{fill:#3A3E45} .m-screen{fill:#07100C}
+.m-line-1{fill:var(--syn-key)} .m-line-2{fill:var(--syn-str)} .m-line-3{fill:var(--syn-num)}
+@keyframes tapL{0%,100%{transform:translateY(0)}50%{transform:translateY(-2.5px)}}
+@keyframes tapR{0%,100%{transform:translateY(-2.5px)}50%{transform:translateY(0)}}
+@keyframes synShift{0%,45%{opacity:1}55%,100%{opacity:0}}
+@keyframes glowPulse{0%,100%{opacity:.30}50%{opacity:.72}}
+.m-handL{animation:tapL 360ms var(--ease-io) infinite}
+.m-handR{animation:tapR 360ms var(--ease-io) infinite}
+.m-syn-b{animation:synShift 2.6s steps(1,end) infinite}
+.m-glow{opacity:.30;animation:glowPulse 3.4s var(--ease-io) infinite}
+.mascot[data-state="thinking"] .m-handL{animation-duration:190ms}
+.mascot[data-state="thinking"] .m-handR{animation-duration:190ms}
+.mascot[data-state="thinking"] .m-glow{animation-duration:900ms}
+.m-check{opacity:0;transform-origin:66px 78px}
+@keyframes checkPop{0%{opacity:0;transform:scale(.4)}40%{opacity:1;transform:scale(1.12)}80%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(1)}}
+.mascot[data-state="answering"] .m-check{animation:checkPop 900ms var(--ease) forwards}
+.mascot[data-state="answering"] .m-handL,
+.mascot[data-state="answering"] .m-handR{animation-play-state:paused}
+
+/* ============================================================
+   11b. PROCESSING INDICATOR — shared by Chat + Learning
+   Lives inline in the response area. Mounted on submit,
+   unmounted on the first streamed token.
+   ============================================================ */
+.proc{display:flex;gap:14px;margin-bottom:var(--sp-6);animation:msgIn 200ms var(--ease) both}
+.proc-dots{display:flex;align-items:center;gap:6px;height:28px;padding-top:2px}
+.proc-dots i{
+  width:7px;height:7px;border-radius:var(--r-pill);
+  background:var(--acc);
+  opacity:.35;transform:scale(.78);
+  animation:procPulse 750ms var(--ease-io) infinite;
+  will-change:opacity,transform;
+}
+.proc-dots i:nth-child(2){animation-delay:130ms}
+.proc-dots i:nth-child(3){animation-delay:260ms}
+@keyframes procPulse{
+  0%,100%{opacity:.32;transform:scale(.78)}
+  50%    {opacity:1;  transform:scale(1)}
+}
+/* one-shot fade-out so the swap to the first token isn't a hard cut */
+.proc.leaving{animation:procOut 140ms var(--ease) forwards}
+@keyframes procOut{to{opacity:0;transform:translateY(-2px)}}
+
+/* ============================================================
+   11c. MODEL SELECTOR — inside the composer, all three sections
+   ============================================================ */
+.model-wrap{position:relative}
+.model-pill{
+  display:flex;align-items:center;gap:7px;height:30px;padding:0 9px 0 8px;
+  border-radius:var(--r-pill);
+  color:var(--tx-mid);font-size:var(--t-12);font-weight:500;
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+  max-width:190px;
+}
+[data-section="code"] .model-pill{border-radius:var(--r-ctl);font-family:var(--mono)}
+.model-pill:hover{background:var(--s-3);color:var(--tx-hi)}
+.model-pill[aria-expanded="true"]{background:var(--s-3);color:var(--tx-hi)}
+.model-pill .chev{width:13px;height:13px;color:var(--tx-low);flex:0 0 13px;transition:transform var(--dur) var(--ease)}
+.model-pill[aria-expanded="true"] .chev{transform:rotate(180deg)}
+.model-name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Auto-mode indicator: a soft accent orb, not an icon */
+.auto-orb{
+  width:7px;height:7px;flex:0 0 7px;border-radius:var(--r-pill);
+  background:var(--acc);box-shadow:0 0 6px var(--acc-glow);
+  animation:autoBreathe 2.6s var(--ease-io) infinite;
+}
+@keyframes autoBreathe{0%,100%{opacity:.55}50%{opacity:1}}
+/* manual override → flat neutral dot, no glow, no motion */
+.model-pill[data-mode="manual"] .auto-orb{background:var(--tx-low);box-shadow:none;animation:none}
+/* hover reveals what Auto actually routed to */
+.model-pill .routed{color:var(--tx-low);white-space:nowrap;max-width:0;overflow:hidden;
+  transition:max-width var(--dur-slow) var(--ease),opacity var(--dur) var(--ease);opacity:0}
+.model-pill[data-mode="auto"]:hover .routed{max-width:130px;opacity:1}
+
+.model-pop{
+  position:absolute;left:0;bottom:calc(100% + 8px);width:286px;
+  background:var(--s-4);border:1px solid var(--line);border-radius:14px;
+  box-shadow:var(--e-3);padding:var(--sp-2);z-index:70;
+  opacity:0;transform:translateY(6px) scale(.98);transform-origin:bottom left;pointer-events:none;
+  transition:opacity var(--dur) var(--ease),transform var(--dur) var(--ease);
+}
+[data-section="code"] .model-pop{border-radius:var(--r-card)}
+.model-pop.open{opacity:1;transform:none;pointer-events:auto}
+.mp-group{margin-top:var(--sp-2)}
+.mp-group:first-of-type{margin-top:var(--sp-1)}
+.mp-label{
+  margin:0;padding:var(--sp-1) var(--sp-2) var(--sp-1);
+  font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--tx-low);
+}
+.mp-item{
+  display:flex;align-items:center;gap:10px;width:100%;
+  padding:7px var(--sp-2);border-radius:var(--r-ctl);
+  color:var(--tx-mid);font-size:var(--t-14);text-align:left;
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.mp-item:hover{background:rgba(255,255,255,.055);color:var(--tx-hi)}
+.mp-item .mp-main{display:flex;flex-direction:column;line-height:1.35;min-width:0}
+.mp-item .mp-sub{font-size:var(--t-12);color:var(--tx-low)}
+.mp-item .mp-check{width:15px;height:15px;margin-left:auto;color:var(--acc);opacity:0;flex:0 0 15px}
+.mp-item[aria-selected="true"]{color:var(--tx-hi)}
+.mp-item[aria-selected="true"] .mp-check{opacity:1}
+.mp-auto{border-bottom:1px solid var(--line);border-radius:var(--r-ctl) var(--r-ctl) 0 0;padding-bottom:9px;margin-bottom:var(--sp-1)}
+.mp-auto .auto-orb{margin-left:1px}
+
+/* ============================================================
+   11d. LEARNING — source chips + generated outputs
+   ============================================================ */
+.sources{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-bottom:var(--sp-2)}
+.sources:empty{display:none}
+.src-chip{
+  display:flex;align-items:center;gap:9px;
+  padding:6px 8px 6px 6px;border-radius:12px;
+  background:var(--s-3);border:1px solid var(--line);
+  animation:msgIn 200ms var(--ease) both;max-width:260px;
+}
+.src-thumb{
+  width:36px;height:26px;flex:0 0 36px;border-radius:6px;overflow:hidden;
+  background:var(--s-inset);display:grid;place-items:center;position:relative;
+}
+.src-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.src-thumb svg{width:15px;height:15px;color:var(--acc)}
+.src-meta{display:flex;flex-direction:column;min-width:0;line-height:1.3}
+.src-title{font-size:var(--t-12);font-weight:500;color:var(--tx-hi);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.src-kind{font-size:11px;color:var(--tx-low)}
+.src-x{
+  width:22px;height:22px;flex:0 0 22px;display:grid;place-items:center;border-radius:6px;
+  color:var(--tx-low);transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.src-x svg{width:13px;height:13px}
+.src-x:hover{background:rgba(255,255,255,.07);color:var(--tx-hi)}
+
+/* output-mode action cards */
+.out-actions{display:flex;gap:var(--sp-2);flex-wrap:wrap;margin-top:var(--sp-4)}
+.out-card{
+  display:flex;align-items:center;gap:11px;
+  padding:12px 15px;border-radius:var(--r-card);
+  background:var(--s-2);border:1px solid var(--line);text-align:left;
+  transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),transform var(--dur-fast) var(--ease);
+}
+.out-card:hover{background:var(--s-3);border-color:var(--acc-line)}
+.out-card:active{transform:scale(.99)}
+.out-card[disabled]{opacity:.45;cursor:not-allowed}
+.out-ico{width:32px;height:32px;flex:0 0 32px;border-radius:9px;background:var(--acc-soft);display:grid;place-items:center}
+.out-ico svg{width:17px;height:17px;color:var(--acc)}
+.out-txt{display:flex;flex-direction:column;line-height:1.35}
+.out-t{font-size:var(--t-14);font-weight:500;color:var(--tx-hi)}
+.out-s{font-size:var(--t-12);color:var(--tx-low)}
+
+/* study notes */
+.notes{margin-top:var(--sp-4);padding:var(--sp-4) var(--sp-6);background:var(--s-2);border-radius:var(--r-card);border:1px solid var(--line)}
+.notes h3{margin:0 0 var(--sp-3);font-size:var(--t-20);font-weight:600;letter-spacing:-.01em}
+.notes h4{margin:var(--sp-4) 0 var(--sp-2);font-size:var(--t-14);font-weight:600;color:var(--acc);
+  text-transform:uppercase;letter-spacing:.06em}
+.notes ul{margin:0;padding-left:18px}
+.notes li{margin-bottom:6px;color:var(--tx-mid);font-size:var(--t-14);line-height:1.7}
+.notes li::marker{color:var(--tx-dis)}
+.term{color:var(--tx-hi);font-weight:600;background:var(--acc-soft);
+  padding:1px 5px;border-radius:5px;box-decoration-break:clone}
+
+/* slides carousel */
+.deck{margin-top:var(--sp-4);border:1px solid var(--line);border-radius:var(--r-card);overflow:hidden;background:var(--s-2)}
+.deck-stage{position:relative;aspect-ratio:16/9;background:var(--s-inset)}
+.slide{
+  position:absolute;inset:0;padding:var(--sp-6) var(--sp-8);
+  display:flex;flex-direction:column;justify-content:center;
+  opacity:0;transform:translateX(12px);pointer-events:none;
+  transition:opacity var(--dur-slow) var(--ease),transform var(--dur-slow) var(--ease);
+}
+.slide.on{opacity:1;transform:none;pointer-events:auto}
+.slide h3{margin:0 0 var(--sp-4);font-size:var(--t-24);font-weight:600;letter-spacing:-.02em;line-height:1.25}
+.slide h3::after{content:"";display:block;width:36px;height:3px;border-radius:2px;background:var(--acc);margin-top:12px}
+.slide ul{margin:0;padding-left:18px}
+.slide li{margin-bottom:9px;color:var(--tx-mid);font-size:var(--t-16);line-height:1.55}
+.slide li::marker{color:var(--acc)}
+.deck-bar{display:flex;align-items:center;gap:var(--sp-2);padding:10px var(--sp-3);border-top:1px solid var(--line)}
+.deck-n{font-size:var(--t-12);color:var(--tx-low);font-variant-numeric:tabular-nums}
+.deck-dots{display:flex;gap:6px;margin:0 auto}
+.deck-dots button{width:6px;height:6px;padding:0;flex:0 0 6px;border-radius:var(--r-pill);background:var(--line-2);
+  transition:background var(--dur) var(--ease),transform var(--dur) var(--ease)}
+.deck-dots button[aria-current="true"]{background:var(--acc);transform:scale(1.35)}
+.deck-nav{width:28px;height:28px;border-radius:var(--r-ctl);display:grid;place-items:center;color:var(--tx-mid);
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
+.deck-nav svg{width:15px;height:15px}
+.deck-nav:hover:not([disabled]){background:var(--s-3);color:var(--tx-hi)}
+.deck-nav[disabled]{opacity:.3;cursor:not-allowed}
+
+/* ---------- 12. RESPONSIVE ---------- */
+/* < 1024px → icon-only rail */
+@media (max-width:1023px){
+  .app{--rail:72px}
+  .sidebar{padding:var(--sp-3) 10px}
+  .wordmark,.nav-item span,.acct-meta,.acct-btn .chev,.nav-label,.recents,.sb-toggle{display:none}
+  .new-chat{justify-content:center;padding:0;width:52px;height:44px;margin:0 auto}
+  .new-chat span{display:none}
+  .nav{align-items:center;flex:1}
+  .nav-item{justify-content:center;width:52px;padding:0}
+  .nav-item::before{left:-10px}
+  .sb-head{justify-content:center;padding:0}
+  .acct-btn{justify-content:center;padding:var(--sp-2) 0}
+  .acct-pop{left:calc(100% + 10px);bottom:0;transform-origin:bottom left}
+  .col,.hero,.dock{padding-left:var(--sp-4);padding-right:var(--sp-4)}
+}
+/* User-driven collapse at ≥1024 mirrors the rail */
+@media (min-width:1024px){
+  .app[data-nav="collapsed"]{--rail:72px}
+  .app[data-nav="collapsed"] .wordmark,
+  .app[data-nav="collapsed"] .nav-item span,
+  .app[data-nav="collapsed"] .acct-meta,
+  .app[data-nav="collapsed"] .acct-btn .chev,
+  .app[data-nav="collapsed"] .nav-label,
+  .app[data-nav="collapsed"] .recents{display:none}
+  .app[data-nav="collapsed"] .sidebar{padding:var(--sp-3) 10px}
+  .app[data-nav="collapsed"] .sb-head{justify-content:center;padding:0}
+  .app[data-nav="collapsed"] .new-chat{justify-content:center;padding:0;width:52px;height:44px;margin:0 auto}
+  .app[data-nav="collapsed"] .new-chat span{display:none}
+  .app[data-nav="collapsed"] .nav{align-items:center;flex:1}
+  .app[data-nav="collapsed"] .nav-item{justify-content:center;width:52px;padding:0}
+  .app[data-nav="collapsed"] .nav-item::before{left:-10px}
+  .app[data-nav="collapsed"] .acct-btn{justify-content:center;padding:var(--sp-2) 0}
+  .app[data-nav="collapsed"] .acct-pop{left:calc(100% + 10px);bottom:0}
+  .only-mobile{display:none}
+}
+/* < 768px → slide-over drawer */
+@media (max-width:767px){
+  .app{--rail:264px}
+  .sidebar{
+    position:fixed;inset:0 auto 0 0;padding:var(--sp-3);
+    transform:translateX(-100%);
+    transition:transform var(--dur-slow) var(--ease);
+    box-shadow:var(--e-3);
+  }
+  .app[data-drawer="open"] .sidebar{transform:none}
+  /* undo the rail overrides — the drawer is the full-width sidebar again */
+  .wordmark{display:inline}
+  .nav-label{display:block}
+  .nav-item span,.new-chat span{display:inline}
+  .acct-meta{display:flex}
+  .acct-btn .chev{display:block}
+  .recents{display:flex}
+  .new-chat{justify-content:flex-start;padding:0 var(--sp-3);width:auto;height:42px;margin:0}
+  .nav{align-items:stretch}
+  .nav-item{justify-content:flex-start;width:auto;padding:0 var(--sp-3)}
+  .nav-item::before{left:0}
+  .sb-head{justify-content:flex-start;padding:0 var(--sp-2)}
+  .acct-btn{justify-content:flex-start;padding:var(--sp-2)}
+  .acct-pop{left:0;bottom:calc(100% + 8px)}
+  .scrim{
+    position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(2px);
+    opacity:0;pointer-events:none;z-index:35;
+    transition:opacity var(--dur-slow) var(--ease);
+  }
+  .app[data-drawer="open"] .scrim{opacity:1;pointer-events:auto}
+  .greet{font-size:var(--t-24)}
+  .greet-sub{font-size:var(--t-14)}
+  .col,.hero,.dock{padding-left:var(--sp-4);padding-right:var(--sp-4)}
+  .bubble{max-width:88%}
+  .mascot{right:16px;width:56px;height:72px}
+  .main[data-empty="1"] .mascot{width:72px;height:92px;right:14px}
+  [data-section="code"] .main[data-empty="1"] .hero{padding-right:calc(var(--sp-4) + 84px)}
+  .model-pop{width:min(286px,calc(100vw - 48px))}
+  .suggest{justify-content:flex-start}
+}
+@media (min-width:768px){.scrim{display:none}.only-mobile{display:none}}
+@media (max-width:767px){.only-mobile{display:grid}}
+
+/* ---------- 13. REDUCED MOTION ---------- */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{
+    animation-duration:1ms !important;animation-iteration-count:1 !important;
+    transition-duration:1ms !important;scroll-behavior:auto !important;
+  }
+  /* Mascot: states become a plain opacity crossfade — no bob, lean, or spark */
+  .mascot .m-rig,.m-handL,.m-handR,.m-glow,.m-syn-b{animation:none !important;transform:none !important}
+  .mascot[data-state="thinking"] .m-eye{animation:none !important;opacity:.65}
+  .m-think,.m-spark,.m-check{transition:opacity 120ms linear !important}
+  .mascot[data-state="answering"] .m-spark,
+  .mascot[data-state="answering"] .m-check{animation:none !important;opacity:1}
+  .cursor{animation:none !important}
+
+  /* Processing indicator: static soft-glow, no pulse */
+  .proc-dots i{
+    animation:none !important;
+    opacity:.85 !important;transform:none !important;
+    box-shadow:0 0 8px var(--acc-glow);
+  }
+  .proc.leaving{animation:none !important;opacity:0}
+  /* Auto-mode orb stops breathing but keeps its glow */
+  .auto-orb{animation:none !important;opacity:1 !important}
+  /* Slides cross-fade in place instead of sliding */
+  .slide{transform:none !important}
+}
+
+/* ---------- 14. Prototype control strip (not part of the product UI) ---------- */
+.proto{
+  position:fixed;right:14px;bottom:10px;z-index:80;
+  display:flex;align-items:center;gap:6px;padding:5px;white-space:nowrap;
+  background:rgba(30,31,35,.86);backdrop-filter:blur(14px);
+  border:1px solid var(--line-2);border-radius:var(--r-pill);box-shadow:var(--e-3);
+}
+.proto b{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--tx-dis);padding:0 8px;font-weight:600}
+.proto button{
+  height:26px;padding:0 11px;border-radius:var(--r-pill);
+  font-size:var(--t-12);color:var(--tx-mid);
+  transition:background var(--dur) var(--ease),color var(--dur) var(--ease);
+}
+.proto button:hover{background:rgba(255,255,255,.07);color:var(--tx-hi)}
+.proto button.on{background:var(--acc-soft);color:var(--acc)}
+@media (max-width:767px){.proto{display:none}}
+</style>
+</head>
+<body>
+
+<div class="app" id="app" data-section="chat" data-nav="expanded" data-drawer="closed">
+  <div class="scrim" id="scrim"></div>
+
+  <!-- ══════════ SIDEBAR ══════════ -->
+  <aside class="sidebar">
+    <div class="sb-head">
+      <div class="mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 12l8 9 8-9-8-9Z"/></svg>
+      </div>
+      <span class="wordmark">Atlas</span>
+      <button class="icon-btn sb-toggle" id="navToggle" aria-label="Collapse sidebar" title="Collapse sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>
+      </button>
+    </div>
+
+    <button class="new-chat" id="newChat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      <span>New chat</span>
+    </button>
+
+    <nav class="nav" aria-label="Modes">
+      <p class="nav-label">Modes</p>
+
+      <button class="nav-item" data-go="chat" aria-current="page">
+        <!-- rounded speech bubble + sparkle -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20.5 11.5a7.5 7.5 0 0 1-10.9 6.7L4 19.5l1.4-4.4A7.5 7.5 0 1 1 20.5 11.5Z"/>
+          <path d="M12.6 8.2 13.3 10l1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7.7-1.8Z"/>
+        </svg>
+        <span>Chat</span>
+      </button>
+
+      <button class="nav-item" data-go="learning">
+        <!-- book + lightbulb spark -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v14H6.5A2.5 2.5 0 0 0 4 19.5v-14Z"/>
+          <path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H19"/>
+          <path d="M11 7.5a2.4 2.4 0 0 1 3.4 3.3c-.4.4-.6.8-.6 1.3M12.7 14.4h0"/>
+        </svg>
+        <span>Learning</span>
+      </button>
+
+      <button class="nav-item" data-go="code">
+        <!-- angular brackets + cursor -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="butt" stroke-linejoin="miter">
+          <path d="M8.5 6 3 12l5.5 6"/><path d="M15.5 6 21 12l-5.5 6"/><path d="M12.8 5.5 11.2 18.5"/>
+        </svg>
+        <span>Code</span>
+      </button>
+    </nav>
+
+    <div class="recents">
+      <p class="nav-label">Recent</p>
+      <a class="rec" href="#">Refactor the websocket reducer</a>
+      <a class="rec" href="#">Explain eventual consistency</a>
+      <a class="rec" href="#">Q3 retro talking points</a>
+      <a class="rec" href="#">Postgres index strategy</a>
+      <a class="rec" href="#">Spaced-repetition plan: Rust</a>
+    </div>
+
+    <!-- ══════════ LOGIN / ACCOUNT ══════════ -->
+    <div class="account">
+      <button class="acct-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar">VK<i class="status-dot"></i></span>
+        <span class="acct-meta">
+          <span class="acct-name">Vinayak K.</span>
+          <span class="acct-sub">Pro · Active</span>
+        </span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg>
+      </button>
+
+      <div class="acct-pop" id="acctPop" role="menu" aria-label="Account">
+        <div class="pop-head">
+          <span class="avatar">VK<i class="status-dot"></i></span>
+          <span class="acct-meta">
+            <span class="acct-name">Vinayak K.</span>
+            <span class="pop-mail">vinayakkvjob@gmail.com</span>
+          </span>
+        </div>
+        <div class="pop-sep"></div>
+        <button class="pop-item" role="menuitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20c1.2-3.6 4-5.5 7.5-5.5s6.3 1.9 7.5 5.5"/></svg>
+          Account
+        </button>
+        <button class="pop-item" role="menuitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7.5 19.4l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3 14a2 2 0 1 1 0-4 1.6 1.6 0 0 0 1.6-2.5l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 10 3a2 2 0 1 1 4 0 1.6 1.6 0 0 0 2.5 1.6l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.6 1.6 0 0 0 21 10a2 2 0 1 1 0 4 1.6 1.6 0 0 0-1.6 1Z"/></svg>
+          Settings
+          <span class="kbd">⌘,</span>
+        </button>
+        <button class="pop-item" role="menuitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.5a2.5 2.5 0 1 1 3.3 2.4c-.6.2-.9.8-.9 1.4v.4"/><path d="M12 17h0"/></svg>
+          Help &amp; docs
+        </button>
+        <div class="pop-sep"></div>
+        <button class="pop-item" role="menuitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M15 17v1.5A2.5 2.5 0 0 1 12.5 21h-6A2.5 2.5 0 0 1 4 18.5v-13A2.5 2.5 0 0 1 6.5 3h6A2.5 2.5 0 0 1 15 5.5V7"/><path d="M10 12h11m0 0-3-3m3 3-3 3"/></svg>
+          Sign out
+        </button>
+        <button class="pop-cta" role="menuitem">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5Z"/></svg>
+          Upgrade to Max
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ══════════ MAIN ══════════ -->
+  <main class="main" id="main" data-empty="1" data-scrolled="0">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="drawerBtn" aria-label="Open navigation">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <div class="crumb"><span class="mode-dot"></span><span id="modeName">Chat</span></div>
+      <div class="spacer"></div>
+      <!-- No model control here by design — it lives inside the composer. -->
+      <button class="icon-btn" aria-label="Share conversation">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4m0 0L8 8m4-4 4 4"/><path d="M5 14v4.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V14"/></svg>
+      </button>
+    </header>
+
+    <div class="stage" id="stage">
+      <div class="col" id="thread"></div>
+    </div>
+
+    <div class="dock">
+      <div class="hero" id="hero">
+        <h1 class="greet" id="greetLine"></h1>
+        <p class="greet-sub" id="greetSub"></p>
+      </div>
+
+      <div class="dock-inner">
+        <!-- ══════════ MASCOT "BIT" — CODE SECTION ONLY ══════════ -->
+        <!-- Chat and Learning use the .proc dot cluster in the response area. -->
+        <div class="mascot" id="mascot" data-state="idle" aria-hidden="true">
+
+          <!-- ---------- CODE: The Techie ---------- -->
+          <svg class="v-code" viewBox="0 0 100 128">
+            <g class="m-rig">
+              <g class="m-think">
+                <rect class="m-dot" x="70" y="24" width="4" height="4" fill="var(--acc)" opacity="0"/>
+                <rect class="m-dot" x="78" y="17" width="5" height="5" fill="var(--acc)" opacity="0"/>
+                <rect class="m-dot" x="87" y="9" width="6" height="6" fill="var(--acc)" opacity="0"/>
+              </g>
+              <path class="m-spark" d="M50 -3 53 3.6 59.6 6.6 53 9.6 50 16.2 47 9.6 40.4 6.6 47 3.6Z" fill="var(--acc)"/>
+
+              <path class="m-stalk" d="M50 22V11"/>
+              <rect class="m-bulb" x="46.5" y="4" width="7" height="7"/>
+
+              <!-- chair silhouette (sharp corners) -->
+              <path class="m-chair" d="M14 62h6v52h-6z"/>
+              <path class="m-chair" d="M8 112h34v6H8z"/>
+
+              <!-- desk -->
+              <path class="m-desk" d="M56 100h44v5H56z"/>
+              <path class="m-desk" d="M92 105h5v20h-5z"/>
+
+              <!-- seated legs toward desk -->
+              <rect class="m-shell-2" x="30" y="100" width="34" height="11"/>
+              <rect class="m-shell" x="60" y="100" width="9" height="14"/>
+
+              <!-- laptop -->
+              <g>
+                <path class="m-lap" d="M58 98h32l6-4H62z"/>
+                <path class="m-lap" d="M62 94V76h30v18z"/>
+                <path class="m-screen" d="M64 92V78h26v14z"/>
+                <rect class="m-glow" x="62" y="76" width="30" height="18" fill="var(--acc)"/>
+                <!-- syntax lines, layer A -->
+                <g>
+                  <rect class="m-line-1" x="67" y="81" width="12" height="2"/>
+                  <rect class="m-line-2" x="67" y="85" width="18" height="2"/>
+                  <rect class="m-line-3" x="67" y="89" width="9"  height="2"/>
+                </g>
+                <!-- layer B toggles on top → reads as a syntax re-highlight -->
+                <g class="m-syn-b">
+                  <rect class="m-line-3" x="67" y="81" width="16" height="2"/>
+                  <rect class="m-line-1" x="67" y="85" width="10" height="2"/>
+                  <rect class="m-line-2" x="67" y="89" width="15" height="2"/>
+                </g>
+                <!-- answering: green check on screen -->
+                <path class="m-check" d="M70 85.5l3.5 3.5 7-7" fill="none" stroke="var(--acc)" stroke-width="3" stroke-linecap="butt"/>
+              </g>
+
+              <!-- typing hands -->
+              <g class="m-handL" style="transform-origin:60px 92px"><rect class="m-shell-2" x="56" y="88" width="9" height="7"/></g>
+              <g class="m-handR" style="transform-origin:74px 92px"><rect class="m-shell-2" x="70" y="88" width="9" height="7"/></g>
+
+              <!-- arms reaching to laptop -->
+              <rect class="m-shell-2" x="44" y="72" width="9" height="20"/>
+              <rect class="m-shell-2" x="66" y="72" width="9" height="18"/>
+
+              <!-- body -->
+              <rect class="m-shell" x="27" y="66" width="42" height="34" rx="6"/>
+              <rect class="m-panel" x="40" y="76" width="16" height="12" rx="2"/>
+
+              <!-- head -->
+              <g class="m-head">
+                <rect class="m-shell" x="22" y="21" width="56" height="44" rx="10"/>
+                <rect class="m-visor" x="28" y="28" width="44" height="27" rx="6"/>
+                <rect class="m-eye" x="37" y="36" width="8" height="8" rx="1"/>
+                <rect class="m-eye" x="55" y="36" width="8" height="8" rx="1"/>
+                <path class="m-mouth" d="M44 49h12"/>
+              </g>
+            </g>
+          </svg>
+        </div>
+
+        <form class="composer" id="composer">
+          <!-- Learning: attached sources sit above the input, removable -->
+          <div class="sources" id="sources"></div>
+
+          <textarea id="input" rows="1" placeholder="Message Atlas…" aria-label="Message"></textarea>
+
+          <div class="composer-row">
+            <!-- ══════════ MODEL SELECTOR — in-composer, all sections ══════════ -->
+            <div class="model-wrap">
+              <button type="button" class="model-pill" id="modelPill"
+                      data-mode="auto" aria-haspopup="listbox" aria-expanded="false">
+                <span class="auto-orb"></span>
+                <span class="model-name" id="modelName">Auto</span>
+                <span class="routed" id="modelRouted"></span>
+                <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+              <div class="model-pop" id="modelPop" role="listbox" aria-label="Model"></div>
+            </div>
+
+            <!-- Learning only: PDF ingestion, sits next to the model selector -->
+            <button type="button" class="tool-btn only-learning" id="pdfBtn" aria-label="Upload a PDF source">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h7l5 5v13H6z"/><path d="M13 3v5h5"/><path d="M12 12v6m0-6-2.2 2.2M12 12l2.2 2.2"/></svg>
+              <span>PDF</span>
+            </button>
+            <input type="file" id="pdfInput" accept="application/pdf,.pdf" multiple hidden>
+
+            <button type="button" class="tool-btn" aria-label="Attach file">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5 12 19.5a5 5 0 0 1-7-7l8.5-8.5a3.4 3.4 0 0 1 4.8 4.8L9.7 17.3a1.8 1.8 0 0 1-2.5-2.5l8-8"/></svg>
+            </button>
+            <button type="button" class="tool-btn" id="toolToggle" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>
+              <span id="toolLabel">Web</span>
+            </button>
+            <button type="submit" class="send" id="send" disabled aria-label="Send message">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V5m0 0-6 6m6-6 6 6"/></svg>
+            </button>
+          </div>
+        </form>
+
+        <div class="suggest" id="suggest"></div>
+        <p class="disclaimer">Atlas can make mistakes. Verify important details.</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- prototype-only control strip -->
+<div class="proto">
+  <b>Code mascot</b>
+  <button data-st="idle" class="on">idle</button>
+  <button data-st="thinking">thinking</button>
+  <button data-st="answering">answering</button>
+  <b style="padding-left:6px">Demo</b>
+  <button id="runDemo">run turn</button>
+  <button id="runSource">source turn</button>
+  <button id="resetBtn">reset</button>
+</div>
+
+<script>
+(() => {
+"use strict";
+const $ = s => document.querySelector(s);
+const app = $("#app"), main = $("#main"), stage = $("#stage"), thread = $("#thread");
+const mascot = $("#mascot"), composer = $("#composer"), input = $("#input"), send = $("#send");
+
+const USER = "Vinayak";
+
+/* ============================================================
+   MODEL CATALOGUE + ROUTER CONFIG
+   Both are plain objects on purpose — swapping a default or
+   adding a model is a one-line change, no logic to touch.
+   ============================================================ */
+const MODELS = {
+  "claude-sonnet"     : { label:"Claude Sonnet",     provider:"Claude"     },
+  "llama-70b"         : { label:"Llama 70B",         provider:"Groq"       },
+  "llama-4-scout"     : { label:"Llama 4 Scout",     provider:"OpenRouter",
+                          detail:"17B-16E-Instruct" },
+  "nemotron-3"        : { label:"Nemotron 3 Ultra",  provider:"OpenRouter" },
+  /* The OpenCode pool — what Auto routes between, one per task type. */
+  "deepseek_v4_flash" : { label:"DeepSeek V4 Flash", provider:"OpenCode",
+                          detail:"Fast · lowest cost" },
+  "minimax_m2_7"      : { label:"Minimax M2.7",      provider:"OpenCode",
+                          detail:"Code editing" },
+  "qwen3_7_plus"      : { label:"Qwen 3.7 Plus",     provider:"OpenCode",
+                          detail:"Vision · layout" },
+  "mimo_v2_5"         : { label:"MiMo V2.5",         provider:"OpenCode",
+                          detail:"Long-horizon reasoning" }
+};
+const PROVIDER_ORDER = ["Claude","Groq","OpenRouter","OpenCode"];
+
+/* Auto mode: section → model. Section/task type is the ONLY input.
+   No complexity scoring, no history. Reconfigure here. */
+const AUTO_ROUTE = {
+  chat    : "claude-sonnet",
+  learning: "nemotron-3",
+  code    : "llama-4-scout"
+};
+
+/* null === Auto. Manual choice persists per section for the session. */
+const modelChoice = { chat:null, learning:null, code:null };
+
+const resolveModel = sec => modelChoice[sec] || AUTO_ROUTE[sec];
+const isAuto       = sec => modelChoice[sec] === null;
+
+/* ---------- section config ---------- */
+const SECTIONS = {
+  chat: {
+    name:"Chat",
+    sub:"Ask anything. I'll keep it conversational and get to the point.",
+    ph:"Message Atlas…",
+    tool:"Web",
+    sug:[["Draft a reply to this email","mail"],["Summarize a long doc","doc"],["Plan my week","cal"]],
+    seed:"How should I structure a weekly review that actually sticks?"
+  },
+  learning: {
+    name:"Learning",
+    sub:"Pick a topic and we'll build it up step by step, with checkpoints.",
+    ph:"What do you want to understand?",
+    tool:"Sources",
+    sug:[["Explain CAP theorem","doc"],["Quiz me on Rust ownership","cal"],["Build a 4-week syllabus","mail"]],
+    seed:"Teach me how database indexes actually work."
+  },
+  code: {
+    name:"Code",
+    sub:"Paste a stack trace, a diff, or a half-formed idea. I'll work with it.",
+    ph:"Describe the change, or paste code…",
+    tool:"Repo",
+    sug:[["debounce(fn, ms)","doc"],["explain this regex","cal"],["write a test for it","mail"]],
+    seed:"Write a typed debounce helper with a cancel method."
+  }
+};
+const SUG_ICON = {
+  mail:'<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h13A2.5 2.5 0 0 1 21 7.5v9A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-9Z"/><path d="m4 7 8 6 8-6"/>',
+  doc :'<path d="M6 3h7l5 5v13H6z"/><path d="M13 3v5h5M9 13h6M9 17h4"/>',
+  cal :'<rect x="3.5" y="5" width="17" height="16" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>'
+};
+
+/* ---------- greeting ---------- */
+function greeting(){
+  const h = new Date().getHours();
+  return h < 5 ? "Still up" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
+
+/* ---------- section switching ---------- */
+let section = "chat";
+function setSection(next){
+  section = next;
+  const cfg = SECTIONS[next];
+  app.dataset.section = next;
+  $("#modeName").textContent = cfg.name;
+  $("#greetLine").innerHTML = `${greeting()}, <span class="accent">${USER}</span>`;
+  $("#greetSub").textContent = cfg.sub;
+  input.placeholder = cfg.ph;
+  $("#toolLabel").textContent = cfg.tool;
+  document.querySelectorAll(".nav-item").forEach(b => {
+    if(b.dataset.go === next) b.setAttribute("aria-current","page");
+    else b.removeAttribute("aria-current");
+  });
+  $("#suggest").innerHTML = cfg.sug.map(([label,ic]) =>
+    `<button class="sug" data-q="${label}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${SUG_ICON[ic]}</svg>${label}</button>`
+  ).join("");
+  renderModelPill();
+  renderModelPop();
+  reset();
+}
+document.querySelectorAll(".nav-item").forEach(b =>
+  b.addEventListener("click", () => { setSection(b.dataset.go); app.dataset.drawer = "closed"; }));
+
+/* ============================================================
+   MODEL SELECTOR
+   ============================================================ */
+const modelPill = $("#modelPill"), modelPop = $("#modelPop");
+
+function renderModelPill(){
+  const auto = isAuto(section);
+  const m = MODELS[resolveModel(section)];
+  modelPill.dataset.mode = auto ? "auto" : "manual";
+  $("#modelName").textContent = auto ? "Auto" : m.label;
+  // hover reveal: "Auto · Claude Sonnet"
+  $("#modelRouted").textContent = auto ? ` · ${m.label}` : "";
+  modelPill.title = auto ? `Auto · routed to ${m.label} (${m.provider})` : `${m.label} · ${m.provider}`;
+}
+
+function renderModelPop(){
+  const cur = modelChoice[section];
+  const autoTarget = MODELS[AUTO_ROUTE[section]];
+  const check = `<svg class="mp-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L19 8"/></svg>`;
+
+  let html = `
+    <button class="mp-item mp-auto" role="option" data-pick="auto" aria-selected="${cur === null}">
+      <span class="auto-orb"></span>
+      <span class="mp-main">
+        <span>Auto</span>
+        <span class="mp-sub">Routed by section → ${autoTarget.label}</span>
+      </span>${check}
+    </button>`;
+
+  for(const prov of PROVIDER_ORDER){
+    const ids = Object.keys(MODELS).filter(id => MODELS[id].provider === prov);
+    if(!ids.length) continue;
+    html += `<div class="mp-group"><p class="mp-label">${prov}</p>`;
+    for(const id of ids){
+      const m = MODELS[id];
+      html += `
+        <button class="mp-item" role="option" data-pick="${id}" aria-selected="${cur === id}">
+          <span class="mp-main">
+            <span>${m.label}</span>
+            ${m.detail ? `<span class="mp-sub">${m.detail}</span>` : ""}
+          </span>${check}
+        </button>`;
+    }
+    html += `</div>`;
+  }
+  modelPop.innerHTML = html;
+}
+
+function closeModelPop(){
+  modelPop.classList.remove("open");
+  modelPill.setAttribute("aria-expanded","false");
+}
+modelPill.addEventListener("click", e => {
+  e.stopPropagation();
+  const open = modelPop.classList.toggle("open");
+  modelPill.setAttribute("aria-expanded", String(open));
+  if(open) renderModelPop();
+});
+modelPop.addEventListener("click", e => {
+  const item = e.target.closest("[data-pick]");
+  if(!item) return;
+  const pick = item.dataset.pick;
+  modelChoice[section] = pick === "auto" ? null : pick;   // persists for this section
+  renderModelPill();
+  closeModelPop();                                        // closes on selection
+});
+
+/* ---------- mascot state machine (Code section only) ---------- */
+function setMascot(state){
+  mascot.dataset.state = state;                       // .mascot-idle / -thinking / -answering
+  document.querySelectorAll(".proto [data-st]").forEach(b => b.classList.toggle("on", b.dataset.st === state));
+}
+setMascot("idle");
+document.querySelectorAll(".proto [data-st]").forEach(b => b.addEventListener("click", () => setMascot(b.dataset.st)));
+
+/* ============================================================
+   PROCESSING INDICATOR — Chat + Learning
+   Mounted on submit, unmounted on first token.
+   ============================================================ */
+let procEl = null;
+function showProc(){
+  if(section === "code") return;            // Code uses the mascot's thinking state
+  procEl = document.createElement("div");
+  procEl.className = "proc";
+  procEl.setAttribute("role","status");
+  procEl.setAttribute("aria-label","Generating response");
+  procEl.innerHTML = AI_MARK + `<div class="proc-dots"><i></i><i></i><i></i></div>`;
+  thread.appendChild(procEl);
+  scrollEnd();
+}
+function hideProc(){
+  if(!procEl) return;
+  const el = procEl; procEl = null;
+  el.classList.add("leaving");
+  setTimeout(() => el.remove(), 140);
+}
+
+/* ---------- composer ---------- */
+function autosize(){
+  input.style.height = "0px";                       // collapse first, or scrollHeight ratchets up
+  input.style.height = Math.min(Math.max(input.scrollHeight, 26), 180) + "px";
+}
+function syncArmed(){
+  const armed = input.value.trim().length > 0 || sources.length > 0;
+  composer.classList.toggle("armed", armed);
+  send.disabled = !armed;
+}
+input.addEventListener("input", () => {
+  autosize();
+  if(section === "learning") captureYouTube();
+  syncArmed();
+});
+input.addEventListener("keydown", e => {
+  if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); composer.requestSubmit(); }
+});
+composer.addEventListener("submit", e => { e.preventDefault(); submit(input.value.trim()); });
+document.addEventListener("click", e => {
+  const s = e.target.closest(".sug");
+  if(s){ input.value = s.dataset.q; input.dispatchEvent(new Event("input")); input.focus(); }
+});
+$("#toolToggle").addEventListener("click", function(){
+  this.setAttribute("aria-pressed", this.getAttribute("aria-pressed") === "true" ? "false" : "true");
+});
+
+/* ============================================================
+   LEARNING — SOURCE INGESTION (PDF + YouTube)
+   ============================================================ */
+const sources = [];                          // multiple per session
+const sourcesEl = $("#sources");
+
+/* youtu.be/ID · youtube.com/watch?v=ID · /shorts/ID · /embed/ID */
+const YT_RE = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?(?:[^\s]*&)?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})(?:[^\s]*)?/;
+
+function addSource(src){
+  if(sources.some(s => s.key === src.key)) return;   // no duplicates
+  sources.push(src);
+  renderSources();
+  syncArmed();
+}
+function removeSource(key){
+  const i = sources.findIndex(s => s.key === key);
+  if(i > -1){ sources.splice(i,1); renderSources(); syncArmed(); }
+}
+function renderSources(){
+  sourcesEl.innerHTML = sources.map(s => `
+    <div class="src-chip" data-key="${s.key}">
+      <span class="src-thumb">${s.thumb}</span>
+      <span class="src-meta">
+        <span class="src-title">${escapeHtml(s.title)}</span>
+        <span class="src-kind">${s.kind}</span>
+      </span>
+      <button type="button" class="src-x" aria-label="Remove ${escapeHtml(s.title)}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>`).join("");
+}
+sourcesEl.addEventListener("click", e => {
+  const x = e.target.closest(".src-x");
+  if(x) removeSource(x.closest(".src-chip").dataset.key);
+});
+
+/* Pasting a YouTube URL turns it into a chip and strips it from the text */
+function captureYouTube(){
+  const m = input.value.match(YT_RE);
+  if(!m) return;
+  const id = m[1];
+  input.value = input.value.replace(m[0], "").replace(/\s{2,}/g," ").trim();
+  autosize();
+  addSource({
+    key:"yt:"+id, kind:"YouTube", title:"youtu.be/"+id,
+    thumb:`<img src="https://i.ytimg.com/vi/${id}/mqdefault.jpg" alt=""
+             onerror="this.remove()"><svg viewBox="0 0 24 24" fill="currentColor" style="position:absolute"><path d="M8 5.5v13l11-6.5z"/></svg>`
+  });
+}
+
+/* PDF upload */
+$("#pdfBtn").addEventListener("click", () => $("#pdfInput").click());
+$("#pdfInput").addEventListener("change", e => {
+  [...e.target.files].forEach(f => addSource({
+    key:"pdf:"+f.name+":"+f.size, kind:`PDF · ${(f.size/1024/1024).toFixed(1)} MB`, title:f.name,
+    thumb:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h7l5 5v13H6z"/><path d="M13 3v5h5"/></svg>`
+  }));
+  e.target.value = "";                       // allow re-picking the same file
+});
+
+/* ---------- turn lifecycle ---------- */
+const AI_MARK = `<span class="ai-avatar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 12l8 9 8-9-8-9Z"/></svg></span>`;
+
+function submit(text){
+  if(!text && !sources.length) return;
+
+  const attached = sources.slice();                          // snapshot for this turn
+  main.dataset.empty = "0";
+
+  const chips = attached.length
+    ? `<div class="sources" style="margin:0 0 8px;justify-content:flex-end">` +
+      attached.map(s => `<span class="src-chip"><span class="src-thumb">${s.thumb}</span>
+        <span class="src-meta"><span class="src-title">${escapeHtml(s.title)}</span>
+        <span class="src-kind">${s.kind}</span></span></span>`).join("") + `</div>`
+    : "";
+  thread.insertAdjacentHTML("beforeend",
+    `<div class="msg user"><div>${chips}${text ? `<div class="bubble">${escapeHtml(text)}</div>` : ""}</div></div>`);
+
+  input.value = ""; autosize();
+  sources.length = 0; renderSources();
+  composer.classList.remove("armed"); send.disabled = true;
+  scrollEnd();
+
+  showProc();                                                // idle → thinking on submit
+  if(section === "code") setMascot("thinking");
+
+  setTimeout(() => {                                         // first chunk arrives
+    hideProc();                                              // indicator leaves the instant tokens start
+    if(section === "code") setMascot("answering");
+    stream(attached.length ? REPLIES.sourced : REPLIES[section]);
+  }, 1400);
+}
+
+function stream(html){
+  const wrap = document.createElement("div");
+  wrap.className = "msg ai";
+  wrap.innerHTML = AI_MARK + `<div class="bubble"><p id="live"></p></div>`;
+  thread.appendChild(wrap); scrollEnd();
+
+  const live = wrap.querySelector("#live");
+  const words = html.lead.split(" ");
+  let i = 0;
+  const t = setInterval(() => {
+    live.innerHTML = words.slice(0, ++i).join(" ") + '<span class="cursor"></span>';
+    if(i % 5 === 0) scrollEnd();
+    if(i >= words.length){
+      clearInterval(t);
+      live.innerHTML = words.join(" ");
+      live.removeAttribute("id");
+      wrap.querySelector(".bubble").insertAdjacentHTML("beforeend", html.body);
+      wireCopy(wrap); wireOutputs(wrap); scrollEnd();
+      if(section === "code") setMascot("idle");              // answering → idle on stream end
+    }
+  }, 34);
+}
+
+function scrollEnd(){ stage.scrollTop = stage.scrollHeight; }
+stage.addEventListener("scroll", () => main.dataset.scrolled = stage.scrollTop > 4 ? "1" : "0");
+function escapeHtml(s){ return s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+/* ---------- canned rich replies (one per section) ---------- */
+const REPLIES = {
+  chat: {
+    lead:"The reviews that stick are the ones with a fixed slot and a short list. Put it on the calendar at the same time each week, cap it at fifteen minutes, and answer only three questions — what moved, what stalled, what's next.",
+    body:`<p>Keep the artifact in one place you already open daily. If you have to go looking for the doc, you'll skip it by week three.</p>`
+  },
+  learning: {
+    lead:"An index is a sorted side-structure that trades write cost and disk for read speed. The database keeps a copy of one or more columns in order, so it can binary-search instead of scanning every row.",
+    body:`
+      <div class="lesson-head">
+        <svg class="ring" viewBox="0 0 44 44"><circle class="track" cx="22" cy="22" r="18"/><circle class="bar" cx="22" cy="22" r="18"/></svg>
+        <div><p class="lesson-title">How database indexes work</p><p class="lesson-meta">4 steps · ~12 min · beginner</p></div>
+        <span class="pill">2 / 4</span>
+      </div>
+
+      <details class="step" data-done="1" open>
+        <summary>
+          <span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L19 8"/></svg></span>
+          Why a scan gets expensive
+          <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+        </summary>
+        <div class="step-body">
+          Without an index, finding one row in a million-row table means reading all million. Cost grows linearly with table size — fine at 10k rows, painful at 10M.
+        </div>
+      </details>
+
+      <details class="step" data-done="1">
+        <summary>
+          <span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L19 8"/></svg></span>
+          The B-tree, in one picture
+          <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+        </summary>
+        <div class="step-body">
+          Each node holds sorted keys and pointers to children. Depth grows logarithmically, so a billion rows is still only four or five hops from the root.
+          <div class="diagram">
+            <svg viewBox="0 0 380 130" style="width:100%;height:auto">
+              <g fill="none" stroke="var(--acc)" stroke-opacity=".38" stroke-width="1.5">
+                <path d="M190 42v14l-92 12M190 42v14l0 12M190 42v14l92 12"/>
+              </g>
+              <g>
+                <rect x="150" y="20" width="80" height="24" rx="6" fill="var(--acc-soft)" stroke="var(--acc-line)"/>
+                <text x="190" y="36" text-anchor="middle" fill="var(--acc)" font-size="12" font-family="ui-monospace,monospace">40 · 80</text>
+              </g>
+              <g fill="#1F2126" stroke="rgba(255,255,255,.09)">
+                <rect x="58" y="68" width="80" height="24" rx="6"/><rect x="150" y="68" width="80" height="24" rx="6"/><rect x="242" y="68" width="80" height="24" rx="6"/>
+              </g>
+              <g fill="#B9BDC5" font-size="12" font-family="ui-monospace,monospace" text-anchor="middle">
+                <text x="98" y="84">10 · 25</text><text x="190" y="84">55 · 68</text><text x="282" y="84">91 · 97</text>
+              </g>
+              <g fill="none" stroke="rgba(255,255,255,.12)" stroke-width="1.5">
+                <path d="M98 92v10h184V92M190 92v10"/>
+              </g>
+              <text x="190" y="122" text-anchor="middle" fill="#7C8089" font-size="11" font-family="ui-monospace,monospace">leaf pages → row pointers</text>
+            </svg>
+            <p class="diagram-cap">Three levels cover ~1M keys at a branching factor of 100.</p>
+          </div>
+        </div>
+      </details>
+
+      <details class="step">
+        <summary>
+          <span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L19 8"/></svg></span>
+          What indexes cost you
+          <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+        </summary>
+        <div class="step-body">Every insert, update, and delete has to maintain each index. Write-heavy tables pay this on every statement.</div>
+      </details>
+
+      <details class="step">
+        <summary>
+          <span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L19 8"/></svg></span>
+          Composite order &amp; the leftmost rule
+          <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+        </summary>
+        <div class="step-body">An index on <code>(a, b)</code> serves queries filtering on <code>a</code>, or on <code>a</code> and <code>b</code> — but not <code>b</code> alone.</div>
+      </details>`
+  },
+  code: {
+    lead:"Here's a typed version that keeps the trailing-edge behaviour and exposes cancel, so callers can tear it down in a cleanup function.",
+    body:`
+      <div class="codeblock">
+        <div class="cb-head">
+          <span class="cb-dot"></span>
+          <span class="cb-name">debounce.ts</span>
+          <span class="cb-lang">ts</span>
+          <button class="cb-copy" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="butt" stroke-linejoin="miter"><rect x="9" y="9" width="11" height="11" rx="1.5"/><path d="M5 15V5h10"/></svg>
+            <span>copy</span>
+          </button>
+        </div>
+        <div class="cb-body">
+          <div class="gutter">1<br>2<br>3<br>4<br>5<br>6<br>7<br>8<br>9<br>10<br>11<br>12<br>13<br>14</div>
+<div class="code"><span class="c">// trailing-edge debounce with a cancel handle</span>
+<span class="k">export function</span> <span class="f">debounce</span><span class="p">&lt;</span><span class="k">T</span> <span class="k">extends</span> <span class="p">(...</span>a<span class="p">:</span> <span class="k">never</span><span class="p">[])</span> <span class="p">=&gt;</span> <span class="k">void</span><span class="p">&gt;(</span>
+  fn<span class="p">:</span> <span class="k">T</span><span class="p">,</span>
+  ms <span class="p">=</span> <span class="n">200</span><span class="p">,</span>
+<span class="p">)</span> <span class="p">{</span>
+  <span class="k">let</span> t<span class="p">:</span> <span class="k">ReturnType</span><span class="p">&lt;</span><span class="k">typeof</span> setTimeout<span class="p">&gt; |</span> <span class="k">undefined</span>
+
+  <span class="k">const</span> <span class="f">run</span> <span class="p">= (...</span>args<span class="p">:</span> <span class="k">Parameters</span><span class="p">&lt;</span><span class="k">T</span><span class="p">&gt;) =&gt; {</span>
+    <span class="k">if</span> <span class="p">(</span>t<span class="p">)</span> <span class="f">clearTimeout</span><span class="p">(</span>t<span class="p">)</span>
+    t <span class="p">=</span> <span class="f">setTimeout</span><span class="p">(() =&gt;</span> <span class="f">fn</span><span class="p">(...</span>args<span class="p">),</span> ms<span class="p">)</span>
+  <span class="p">}</span>
+
+  run<span class="p">.</span><span class="f">cancel</span> <span class="p">= () =&gt; {</span> <span class="k">if</span> <span class="p">(</span>t<span class="p">)</span> <span class="f">clearTimeout</span><span class="p">(</span>t<span class="p">);</span> t <span class="p">=</span> <span class="k">undefined</span> <span class="p">}</span>
+  <span class="k">return</span> run
+<span class="p">}</span></div>
+        </div>
+      </div>
+      <p>Typing the parameter as <code>never[]</code> rather than <code>any[]</code> keeps <code>Parameters&lt;T&gt;</code> inferring correctly at the call site.</p>`
+  },
+
+  /* shown whenever the turn carried one or more attached sources */
+  sourced: {
+    lead:"I've read through the source. It covers indexing end to end — B-tree structure, selectivity, composite key order, and the write amplification you take on in return. Pick an output and I'll build it.",
+    body:`
+      <div class="out-actions">
+        <button class="out-card" data-out="notes">
+          <span class="out-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18H6z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></span>
+          <span class="out-txt"><span class="out-t">Generate Study Notes</span><span class="out-s">Structured markdown · headers, bullets, key terms</span></span>
+        </button>
+        <button class="out-card" data-out="slides">
+          <span class="out-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span>
+          <span class="out-txt"><span class="out-t">Generate Slides</span><span class="out-s">Deck view · title + 3–5 bullets per slide</span></span>
+        </button>
+      </div>`
+  }
+};
+
+/* ---------- generated outputs ---------- */
+const STUDY_NOTES = `
+  <div class="notes">
+    <h3>Database Indexing — Study Notes</h3>
+    <h4>Core idea</h4>
+    <ul>
+      <li>An <span class="term">index</span> is a sorted side-structure over one or more columns, kept in step with the table.</li>
+      <li>It converts a <span class="term">full table scan</span> (O(n)) into a tree descent (O(log n)).</li>
+      <li>The table itself is unchanged — an index is an <em>addition</em>, never a replacement.</li>
+    </ul>
+    <h4>Structure</h4>
+    <ul>
+      <li><span class="term">B-tree</span> nodes hold sorted keys plus child pointers; all real data sits in leaf pages.</li>
+      <li><span class="term">Branching factor</span> of ~100 means a billion rows is still 4–5 hops deep.</li>
+      <li>Leaf pages are linked, which is what makes <span class="term">range scans</span> cheap.</li>
+    </ul>
+    <h4>Costs</h4>
+    <ul>
+      <li>Every <code>INSERT</code>, <code>UPDATE</code>, and <code>DELETE</code> must maintain <em>each</em> index — this is <span class="term">write amplification</span>.</li>
+      <li>Indexes consume disk and compete for buffer-pool memory.</li>
+      <li>Low <span class="term">selectivity</span> columns (e.g. a boolean) rarely earn their keep.</li>
+    </ul>
+    <h4>Composite keys</h4>
+    <ul>
+      <li>The <span class="term">leftmost prefix rule</span>: an index on <code>(a, b)</code> serves <code>a</code> and <code>a + b</code>, never <code>b</code> alone.</li>
+      <li>Column order is a design decision, not a detail — put the equality predicate first, the range second.</li>
+    </ul>
+  </div>`;
+
+const SLIDES = [
+  { t:"What an Index Is", b:["A sorted side-structure over selected columns","Maintained automatically by the database","Turns a linear scan into a logarithmic descent","Adds to the table — never replaces it"] },
+  { t:"The B-tree",       b:["Internal nodes: sorted keys + child pointers","Leaf pages hold the row pointers","Branching factor ~100 keeps depth at 4–5","Linked leaves make range scans cheap"] },
+  { t:"What It Costs",    b:["Every write maintains every index","Disk footprint and buffer-pool pressure","Low-selectivity columns rarely pay off","Write-heavy tables feel this most"] },
+  { t:"Composite Keys",   b:["Index on (a, b) serves a, and a + b","It does not serve b alone — leftmost prefix rule","Equality predicate first, range second","Column order is a design decision"] },
+  { t:"Rules of Thumb",   b:["Index what you filter and join on","Measure with EXPLAIN before and after","Drop indexes nothing queries","Composite beats several single-column indexes"] }
+];
+
+function renderSlides(){
+  const slides = SLIDES.map((s,i) => `
+    <section class="slide${i === 0 ? " on" : ""}" data-i="${i}" ${i ? 'aria-hidden="true"' : ""}>
+      <h3>${s.t}</h3>
+      <ul>${s.b.map(x => `<li>${x}</li>`).join("")}</ul>
+    </section>`).join("");
+  const dots = SLIDES.map((_,i) =>
+    `<button data-goto="${i}" aria-current="${i === 0}" aria-label="Slide ${i+1}"></button>`).join("");
+  return `
+    <div class="deck">
+      <div class="deck-stage">${slides}</div>
+      <div class="deck-bar">
+        <button class="deck-nav" data-step="-1" disabled aria-label="Previous slide">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 6-6 6 6 6"/></svg>
+        </button>
+        <span class="deck-n"><span class="deck-cur">1</span> / ${SLIDES.length}</span>
+        <span class="deck-dots">${dots}</span>
+        <button class="deck-nav" data-step="1" aria-label="Next slide">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+      </div>
+    </div>`;
+}
+
+function wireDeck(deck){
+  const slides = [...deck.querySelectorAll(".slide")];
+  const dots   = [...deck.querySelectorAll("[data-goto]")];
+  const prev   = deck.querySelector('[data-step="-1"]');
+  const next   = deck.querySelector('[data-step="1"]');
+  let i = 0;
+  const go = n => {
+    i = Math.max(0, Math.min(SLIDES.length - 1, n));
+    slides.forEach((s,k) => { s.classList.toggle("on", k === i); s.setAttribute("aria-hidden", String(k !== i)); });
+    dots.forEach((d,k) => d.setAttribute("aria-current", String(k === i)));
+    deck.querySelector(".deck-cur").textContent = i + 1;
+    prev.disabled = i === 0;
+    next.disabled = i === SLIDES.length - 1;
+  };
+  prev.addEventListener("click", () => go(i - 1));
+  next.addEventListener("click", () => go(i + 1));
+  dots.forEach(d => d.addEventListener("click", () => go(+d.dataset.goto)));
+}
+
+function wireOutputs(scope){
+  scope.querySelectorAll("[data-out]").forEach(btn => btn.addEventListener("click", () => {
+    const kind = btn.dataset.out;
+    const box  = btn.closest(".bubble");
+    btn.disabled = true;                     // only this format; the other stays available
+    box.insertAdjacentHTML("beforeend", kind === "notes" ? STUDY_NOTES : renderSlides());
+    if(kind === "slides") wireDeck(box.querySelector(".deck"));
+    scrollEnd();
+  }));
+}
+
+function wireCopy(scope){
+  scope.querySelectorAll(".cb-copy").forEach(btn => btn.addEventListener("click", async () => {
+    const code = btn.closest(".codeblock").querySelector(".code").innerText;
+    try { await navigator.clipboard.writeText(code); } catch {}
+    const label = btn.querySelector("span");
+    btn.classList.add("ok"); label.textContent = "copied";
+    setTimeout(() => { btn.classList.remove("ok"); label.textContent = "copy"; }, 1600);
+  }));
+}
+
+/* ---------- shell controls ---------- */
+$("#navToggle").addEventListener("click", () => {
+  app.dataset.nav = app.dataset.nav === "collapsed" ? "expanded" : "collapsed";
+});
+$("#drawerBtn").addEventListener("click", () => app.dataset.drawer = "open");
+$("#scrim").addEventListener("click", () => app.dataset.drawer = "closed");
+
+const acctBtn = $("#acctBtn"), acctPop = $("#acctPop");
+acctBtn.addEventListener("click", e => {
+  e.stopPropagation();
+  const open = acctPop.classList.toggle("open");
+  acctBtn.setAttribute("aria-expanded", String(open));
+});
+document.addEventListener("click", e => {
+  if(!e.target.closest(".account")){ acctPop.classList.remove("open"); acctBtn.setAttribute("aria-expanded","false"); }
+  if(!e.target.closest(".model-wrap")) closeModelPop();      // closes on outside click
+});
+document.addEventListener("keydown", e => {
+  if(e.key === "Escape"){
+    acctPop.classList.remove("open"); acctBtn.setAttribute("aria-expanded","false");
+    closeModelPop();
+    app.dataset.drawer = "closed";
+  }
+});
+
+/* ---------- reset / demo ---------- */
+function reset(){
+  thread.innerHTML = "";
+  procEl = null;
+  main.dataset.empty = "1"; main.dataset.scrolled = "0";
+  input.value = ""; autosize();
+  sources.length = 0; renderSources();
+  composer.classList.remove("armed"); send.disabled = true;
+  closeModelPop();
+  setMascot("idle");
+}
+$("#newChat").addEventListener("click", reset);
+$("#resetBtn").addEventListener("click", reset);
+$("#runDemo").addEventListener("click", () => { reset(); submit(SECTIONS[section].seed); });
+/* Learning-only: seeds a YouTube source so the two output modes are reachable */
+$("#runSource").addEventListener("click", () => {
+  setSection("learning");
+  input.value = "Summarize this https://youtu.be/dQw4w9WgXcQ for me";
+  input.dispatchEvent(new Event("input"));
+  setTimeout(() => composer.requestSubmit(), 260);
+});
+
+setSection("chat");
+// re-measure once webfonts land, so the composer never opens over-tall
+if(document.fonts && document.fonts.ready) document.fonts.ready.then(autosize);
+requestAnimationFrame(autosize);
+})();
+</script>
+</body>
+</html>
