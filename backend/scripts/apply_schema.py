@@ -87,6 +87,21 @@ EXPECTED: list[tuple[str, str | None]] = [
     # rather than the browser, which is the whole reason this table exists.
     ("user_preferences", None),
     ("user_preferences", "default_model_id"),
+    # Projects and memory. `sessions.project_id` is what makes a project a
+    # container rather than a label — without it a project can hold
+    # instructions but nothing to apply them to. The two preference columns
+    # are the custom-instruction boxes; `user_memories` is what the account
+    # has learned.
+    ("projects", None),
+    ("projects", "instructions"),
+    ("project_files", None),
+    ("project_files", "content"),
+    ("sessions", "project_id"),
+    ("user_memories", None),
+    ("user_memories", "content"),
+    ("user_preferences", "about_you"),
+    ("user_preferences", "response_style"),
+    ("user_preferences", "memory_enabled"),
 ]
 
 

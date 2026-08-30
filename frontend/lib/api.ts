@@ -52,6 +52,8 @@ export type SessionRow = {
   /** Hidden from the default list, kept in the archive. Never deleted. */
   is_archived?: boolean;
   pinned_at?: string | null;
+  /** Which project this conversation is filed under, or null for unfiled. */
+  project_id?: string | null;
 };
 
 /**
@@ -768,6 +770,21 @@ export type Preferences = {
   user_id: string | null;
   default_model_id: string | null;
   theme: string;
+  /**
+   * The two halves of "custom instructions", asked as two questions because
+   * they are answered differently: one is who you are, the other is how you
+   * want to be written to. Always strings — the server coalesces null to ""
+   * so a textarea can bind to them directly.
+   */
+  about_you: string;
+  response_style: string;
+  /**
+   * Whether new facts are learned from conversations. It does NOT gate the two
+   * fields above: those were typed into this panel deliberately, and turning
+   * memory off means "stop learning things about me", not "discard what I told
+   * you on purpose".
+   */
+  memory_enabled: boolean;
 };
 
 export async function fetchPreferences(
@@ -783,7 +800,13 @@ export async function fetchPreferences(
 
 /** Save preferences. Requires a signed-in account; the server rejects otherwise. */
 export async function savePreferences(
-  patch: { default_model_id?: string | null; theme?: string },
+  patch: {
+    default_model_id?: string | null;
+    theme?: string;
+    about_you?: string;
+    response_style?: string;
+    memory_enabled?: boolean;
+  },
   token?: string | null,
 ): Promise<Preferences> {
   return json(

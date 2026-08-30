@@ -7,8 +7,10 @@ import { searchSessions } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { TOUCH_QUERY, useMediaQuery } from "@/lib/useMediaQuery";
 import { SPRING_SNAP, useMotionOK } from "./Anim";
+import { ProjectStrip } from "./projects/ProjectStrip";
 import { SessionListItem } from "./SessionListItem";
 import type { HistoryAction } from "./SessionHistoryMenu";
+import type { ProjectsState } from "@/lib/useProjects";
 
 export type ShelfView = "active" | "archived";
 
@@ -41,6 +43,9 @@ export const SessionSidebar = memo(function SessionSidebar({
   onClose,
   token,
   section = "chat",
+  projects,
+  signedIn = false,
+  onOpenProject,
 }: {
   sessions: SessionRow[];
   activeId: string | null;
@@ -54,6 +59,14 @@ export const SessionSidebar = memo(function SessionSidebar({
   token?: string | null;
   /** Which section's history to search. Chat and Code are separate lists. */
   section?: "chat" | "code";
+  /**
+   * Projects, when the surface has them. Optional so the Agents shelf — which
+   * mounts this same list and has no project concept — is not forced to
+   * invent one.
+   */
+  projects?: ProjectsState;
+  signedIn?: boolean;
+  onOpenProject?: (id: string) => void;
 }) {
   const motionOK = useMotionOK();
   const touch = useMediaQuery(TOUCH_QUERY);
@@ -87,7 +100,15 @@ export const SessionSidebar = memo(function SessionSidebar({
         )}
       </header>
 
-      <div className="shrink-0 px-3 pb-2.5">
+      {projects && onOpenProject && (
+        <ProjectStrip
+          projects={projects}
+          signedIn={signedIn}
+          onOpenProject={onOpenProject}
+        />
+      )}
+
+      <div className="shrink-0 px-3 pb-2.5 pt-2.5">
         <button
           type="button"
           onClick={onNewSession}
@@ -98,7 +119,9 @@ export const SessionSidebar = memo(function SessionSidebar({
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-accent">
             <path d="M12 5v14M5 12h14" />
           </svg>
-          New session
+          {projects?.filter
+            ? `New in ${projects.byId(projects.filter)?.name ?? "project"}`
+            : "New session"}
         </button>
       </div>
 

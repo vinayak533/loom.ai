@@ -8,6 +8,7 @@ import type { BackendConfig, Preferences } from "@/lib/api";
 import { AUTO_MODEL_ID, fetchPreferences, savePreferences } from "@/lib/api";
 import type { Auth } from "@/lib/useAuth";
 import { authEnabled } from "@/lib/supabase";
+import { PersonalizationGroup } from "./PersonalizationGroup";
 
 /**
  * Settings.
@@ -54,6 +55,9 @@ export function SettingsDialog({
     user_id: null,
     default_model_id: null,
     theme: "dark",
+    about_you: "",
+    response_style: "",
+    memory_enabled: false,
   });
   const [savingPrefs, setSavingPrefs] = useState(false);
   const [prefsError, setPrefsError] = useState<string | null>(null);
@@ -316,6 +320,9 @@ export function SettingsDialog({
                   </p>
                 )}
               </Group>
+
+              {/* -------------------------------------------- personalization */}
+              <PersonalizationGroup prefs={prefs} setPrefs={setPrefs} auth={auth} />
 
               <Group label="This build">
                 <Row

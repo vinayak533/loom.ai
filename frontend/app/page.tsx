@@ -2,6 +2,8 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useProjects } from "@/lib/useProjects";
+import { ProjectPanel } from "@/components/projects/ProjectPanel";
 import {
   AUTO_MODEL_ID,
   DEFAULT_MODEL_ID,
@@ -134,6 +136,9 @@ export default function Page() {
   const auth = useAuth();
   useKeyboardInset();
   const token = auth.token;
+  const projects = useProjects(token, auth.signedIn);
+  /** Which project's panel is open, or null. Not a route: it is a dialog. */
+  const [projectPanel, setProjectPanel] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** The keyboard reference, opened with `?` or from Settings. */
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -148,6 +153,23 @@ export default function Page() {
     code: null,
   });
   const [sessions, setSessions] = useState<SessionRow[]>([]);
+  /**
+   * The shelf, narrowed to the selected project.
+   *
+   * Filtered on the client rather than refetched: the shelf is already in
+   * memory and capped at a page, so a round trip per chip click would be a
+   * network request to hide rows the browser is holding. The server-side
+   * filter exists too (`list_sessions(project_scoped=True)`) and is what the
+   * project panel uses, where the whole project's history is wanted rather
+   * than the current page of the shelf.
+   */
+  const visibleSessions = useMemo(
+    () =>
+      projects.filter
+        ? sessions.filter((s) => s.project_id === projects.filter)
+        : sessions,
+    [sessions, projects.filter],
+  );
   const [config, setConfig] = useState<BackendConfig | null>(null);
   const [section, setSection] = useState<Section>("chat");
   /** Which shelf the current section reads and writes. */
@@ -557,6 +579,11 @@ export default function Page() {
       // included — the sentinel persists exactly like a model id.
       const row = await createSession(token, selection, convSection);
       setSessionId(row.id);
+      // A session started while a project filter is on belongs to that
+      // project. Assigning after creation rather than at creation keeps the
+      // session endpoint unaware of projects, and the extra round trip is off
+      // the critical path — nothing on screen is waiting for it.
+      if (projects.filter) void projects.assign(row.id, projects.filter);
     } catch {
       setSessionId(crypto.randomUUID());
     }
@@ -565,7 +592,7 @@ export default function Page() {
     setTerminalOpen(false);
     setFlyoutOpen(false);
     setTimeout(refreshSessions, 400);
-  }, [token, selection, convSection, setSessionId, refreshSessions]);
+  }, [token, selection, convSection, setSessionId, refreshSessions, projects]);
 
   const removeSession = useCallback(
     async (id: string) => {
@@ -1271,6 +1298,22 @@ export default function Page() {
         }}
       />
 
+      <AnimatePresence>
+        {projectPanel && (
+          <ProjectPanel
+            key={projectPanel}
+            projectId={projectPanel}
+            projects={projects}
+            token={token}
+            onClose={() => setProjectPanel(null)}
+            onOpenSession={(id) => {
+              setSessionId(id);
+              setFlyoutOpen(false);
+            }}
+          />
+        )}
+      </AnimatePresence>
+
       <ShortcutsDialog
         open={shortcutsOpen}
         onClose={() => setShortcutsOpen(false)}
@@ -1401,7 +1444,7 @@ export default function Page() {
                        sm:right-auto sm:w-[272px]"
           >
             <SessionSidebar
-              sessions={sessions}
+              sessions={visibleSessions}
               activeId={sessionId}
               view={shelf}
               onView={selectShelf}
@@ -1411,6 +1454,9 @@ export default function Page() {
               onClose={() => setFlyoutOpen(false)}
               token={token}
               section={convSection}
+              projects={projects}
+              signedIn={auth.signedIn}
+              onOpenProject={setProjectPanel}
             />
           </motion.aside>
         )}
