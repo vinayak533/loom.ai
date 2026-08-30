@@ -36,7 +36,7 @@ from app.llm_router import (
     section_default_model,
     section_default_models,
 )
-from app import analysis, gitmsg, memory
+from app import analysis, artifacts, gitmsg, memory
 from app.learn import ingest
 from app.sources import ingest_youtube, is_youtube_url
 from app.tools import git, workspace
@@ -1439,3 +1439,73 @@ async def git_commit_message(
             "No model was available to write a message.",
         )
     return {"message": message}
+
+
+# --- artifacts -------------------------------------------------------------
+
+
+@router.get("/sessions/{session_id}/artifacts")
+async def list_artifacts(session_id: str, user_id: str | None = Depends(bearer_user)):
+    """The current version of every artifact in this session, newest first.
+
+    Content included: an artifact *is* the thing being looked at, and a
+    listing that omitted it would be followed immediately by a read of each
+    one. Size is bounded on the way in by `artifacts.MAX_CONTENT_CHARS`.
+    """
+    await require_session(user_id, session_id)
+    return await repository.list_artifacts(session_id)
+
+
+@router.get("/sessions/{session_id}/artifacts/{key}/versions")
+async def artifact_versions(
+    session_id: str, key: str, user_id: str | None = Depends(bearer_user)
+):
+    """Every version of one artifact, oldest first."""
+    await require_session(user_id, session_id)
+    return await repository.artifact_versions(session_id, key)
+
+
+@router.put("/sessions/{session_id}/artifacts/{key}")
+async def save_artifact(
+    session_id: str,
+    key: str,
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """A person's edit to an artifact.
+
+    Adds a version attributed to them rather than overwriting the model's. That
+    is the whole contract: nothing the model wrote is destroyed by someone
+    tidying it up, and the model reads their edit on its next turn because it
+    reads the latest version.
+
+    Broadcasts `artifact_updated` so a second tab watching this session follows
+    along, and so the panel updates through the same path an agent write takes
+    — one source of truth for what the current version is.
+    """
+    await require_session_write(user_id, session_id)
+    payload = payload or {}
+    content = payload.get("content")
+    if content is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to save.")
+
+    existing = await repository.get_artifact(session_id, key)
+    if not existing:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such artifact.")
+
+    try:
+        row = await artifacts.write(
+            session_id,
+            key,
+            str(content),
+            title=payload.get("title"),
+            created_by="user",
+            user_id=user_id,
+        )
+    except artifacts.ArtifactError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    emitter = emitter_registry.get(session_id)
+    if emitter:
+        emitter.emit(ev.artifact(row, created=False))
+    return row

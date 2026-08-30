@@ -102,6 +102,13 @@ EXPECTED: list[tuple[str, str | None]] = [
     ("user_preferences", "about_you"),
     ("user_preferences", "response_style"),
     ("user_preferences", "memory_enabled"),
+    # Artifacts. `artifact_key` + `version` is the identity that makes an edit
+    # add a row rather than overwrite one, which is what stops a user tidying
+    # up a draft from destroying what the model actually wrote.
+    ("artifacts", None),
+    ("artifacts", "artifact_key"),
+    ("artifacts", "version"),
+    ("artifacts", "created_by"),
 ]
 
 

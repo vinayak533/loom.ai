@@ -641,8 +641,63 @@ async def analyze_project(
     )
 
 
+
+
+async def artifact_tool(
+    session_id: str, args: dict, call_id: str, emitter: Emitter | None
+) -> ToolResult:
+    """Create or revise an artifact, and push it to the panel.
+
+    One handler for both tools: at this level they are the same write, and the
+    version number the row comes back with says which it was. They are two
+    *schemas* because the model benefits from being told which it is doing.
+
+    The tool result is a one-line summary, never the content. The model just
+    wrote that content and still has it in context; echoing a whole document
+    back doubles its cost for no information, and that is the mistake that
+    makes artifact tools expensive to use.
+    """
+    from app import artifacts
+
+    key = (args.get("id") or "").strip()
+    if not key:
+        return ToolResult("Error: an artifact needs an `id`.", success=False)
+
+    content = args.get("content")
+    if content is None:
+        return ToolResult("Error: an artifact needs `content`.", success=False)
+
+    try:
+        row = await artifacts.write(
+            session_id,
+            key,
+            str(content),
+            kind=args.get("kind"),
+            title=args.get("title"),
+            language=args.get("language"),
+            created_by="agent",
+        )
+    except artifacts.ArtifactError as exc:
+        return ToolResult(f"Error: {exc}", success=False)
+
+    if emitter:
+        emitter.emit(ev.artifact(row, created=int(row.get("version") or 1) == 1))
+
+    return ToolResult(
+        output=artifacts.summarise(row),
+        meta={
+            "artifact_key": row.get("artifact_key"),
+            "version": row.get("version"),
+            "kind": row.get("kind"),
+            "title": row.get("title"),
+        },
+    )
+
+
 HANDLERS = {
     "bash_execute": bash_execute,
+    "create_artifact": artifact_tool,
+    "update_artifact": artifact_tool,
     "git": git_tool,
     "analyze_project": analyze_project,
     "read_file": read_file,

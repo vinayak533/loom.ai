@@ -17,6 +17,27 @@ export type FileNode = {
 
 export type SearchResult = { title: string; url: string; snippet: string };
 
+/**
+ * A document the model wrote beside the conversation.
+ *
+ * `key` is the stable identity across versions; `version` counts up within it.
+ * The content travels on the event rather than behind a fetch, because the
+ * user is watching when it arrives and a round trip to show what the server
+ * already had is a round trip they would sit through.
+ */
+export type ArtifactPayload = {
+  artifact_id: string;
+  key: string;
+  version: number;
+  kind: "markdown" | "code" | "html" | "svg" | "mermaid" | string;
+  title: string;
+  /** Only meaningful for `kind: "code"`. "" otherwise. */
+  language: string;
+  content: string;
+  /** Who wrote this version. A user edit adds a version, never overwrites. */
+  created_by: "agent" | "user" | string;
+};
+
 /** One entry from `git status --porcelain`, already decoded. */
 export type GitChange = {
   path: string;
@@ -79,6 +100,8 @@ export type ServerEvent =
       change: "created" | "modified";
     }
   | { type: "file_tree"; ts: number; path: string; nodes: FileNode[] }
+  | ({ type: "artifact_created"; ts: number } & ArtifactPayload)
+  | ({ type: "artifact_updated"; ts: number } & ArtifactPayload)
   | {
       type: "git_state";
       ts: number;

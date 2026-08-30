@@ -1370,3 +1370,127 @@ async def clear_memories(user_id: str) -> None:
     await _run(
         lambda: client.table("user_memories").delete().eq("user_id", user_id).execute()
     )
+
+
+# --- artifacts -------------------------------------------------------------
+#
+# Every save is a new row: `artifact_key` is the stable identity and `version`
+# counts up within it, so a user's edit adds to the history rather than
+# destroying what the model wrote. The current artifact is the highest version
+# for its key.
+
+
+async def add_artifact(
+    session_id: str,
+    artifact_key: str,
+    content: str,
+    kind: str = "markdown",
+    title: str = "Untitled",
+    language: str | None = None,
+    created_by: str = "agent",
+    user_id: str | None = None,
+) -> dict:
+    """Write the next version of an artifact. Returns the row.
+
+    The version number is read and then written, which is a race if two writers
+    touch one key at once. The unique index on (session_id, artifact_key,
+    version) is what makes that race fail loudly instead of quietly producing
+    two version 3s that later reads would order arbitrarily — and the only two
+    writers are one agent turn and one person, who are not editing the same
+    artifact in the same millisecond.
+    """
+    if not enabled():
+        return {}
+    client = get_client()
+    latest = await get_artifact(session_id, artifact_key)
+    row: dict[str, Any] = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "artifact_key": artifact_key,
+        "version": int((latest or {}).get("version") or 0) + 1,
+        "kind": kind,
+        "title": title,
+        "language": language,
+        "content": content,
+        "created_by": created_by,
+        "created_at": _now(),
+    }
+    res = await _run(lambda: client.table("artifacts").insert(row).execute())
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else {}
+
+
+async def get_artifact(session_id: str, artifact_key: str) -> dict | None:
+    """The current version of one artifact, or None."""
+    if not enabled():
+        return None
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("artifacts")
+            .select("*")
+            .eq("session_id", session_id)
+            .eq("artifact_key", artifact_key)
+            .order("version", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+    res = await _run(_query)
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else None
+
+
+async def list_artifacts(session_id: str) -> list[dict]:
+    """The current version of every artifact in a session, newest first.
+
+    Content is included: an artifact is the thing being looked at, and a
+    listing that omitted it would be followed immediately by a read of each
+    one. They are bounded by `artifacts.MAX_CONTENT_CHARS` on the way in.
+    """
+    if not enabled():
+        return []
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("artifacts")
+            .select("*")
+            .eq("session_id", session_id)
+            .order("version", desc=True)
+            .execute()
+        )
+
+    res = await _run(_query)
+    rows = (getattr(res, "data", None) if res else None) or []
+    # Highest version wins per key. Ordered by version descending above, so the
+    # first row seen for a key is its current version.
+    seen: dict[str, dict] = {}
+    for row in rows:
+        key = row.get("artifact_key")
+        if key and key not in seen:
+            seen[key] = row
+    return sorted(
+        seen.values(), key=lambda r: r.get("created_at") or "", reverse=True
+    )
+
+
+async def artifact_versions(session_id: str, artifact_key: str) -> list[dict]:
+    """Every version of one artifact, oldest first, for the version switcher."""
+    if not enabled():
+        return []
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("artifacts")
+            .select("*")
+            .eq("session_id", session_id)
+            .eq("artifact_key", artifact_key)
+            .order("version")
+            .execute()
+        )
+
+    res = await _run(_query)
+    return (getattr(res, "data", None) if res else None) or []

@@ -798,3 +798,74 @@ drop policy if exists "own memories" on public.user_memories;
 create policy "own memories" on public.user_memories
   for all using (auth.uid()::text = user_id)
   with check (auth.uid()::text = user_id);
+
+
+-- ============================================================================
+--  Artifacts
+-- ============================================================================
+-- A document the model writes *beside* the conversation rather than into it:
+-- a file, a page, a diagram, a draft. The transcript keeps a card; the content
+-- lives here.
+--
+-- Why a table rather than a message
+-- ---------------------------------
+-- An artifact is edited. A message is not: the transcript is a record of what
+-- was said, and rewriting a turn to hold a newer draft would make the history
+-- lie about what the model actually produced at the time. Keeping artifacts
+-- separate means the conversation stays an accurate log while the document
+-- moves on.
+--
+-- Versioning
+-- ----------
+-- Every save is a new row. `artifact_key` is the stable identity — the model
+-- names it once and reuses it — and `version` counts up within that key. The
+-- current artifact is the highest version for its key, which makes "show me
+-- what this was three edits ago" a query rather than a feature nobody built.
+--
+-- That also settles the user-edit question. A person editing an artifact does
+-- not overwrite the model's version; they add one, attributed to them in
+-- `created_by`. Nothing the model wrote is ever destroyed by a person tidying
+-- it up, and the model sees their edit on the next turn because it reads the
+-- latest.
+
+create table if not exists public.artifacts (
+  id           uuid primary key default uuid_generate_v4(),
+  session_id   uuid not null references public.sessions (id) on delete cascade,
+  -- Denormalised from the session so ownership is one read rather than a join.
+  -- Null for the anonymous shelf, exactly as `sessions.user_id` is.
+  user_id      uuid references auth.users (id) on delete cascade,
+  -- Stable across versions. Supplied by the model, so it is a text handle
+  -- ("pricing-page") rather than a uuid it would have to invent and remember.
+  artifact_key text not null,
+  version      integer not null default 1,
+  -- code | markdown | html | svg | mermaid. Text rather than an enum: adding a
+  -- kind should be a frontend case, not a migration.
+  kind         text not null default 'markdown',
+  title        text not null default 'Untitled',
+  -- For `kind = 'code'`. Drives syntax highlighting and nothing else.
+  language     text,
+  content      text not null default '',
+  -- 'agent' or 'user'. What makes a user's edit an addition rather than an
+  -- overwrite, and what lets the UI say who wrote the version being shown.
+  created_by   text not null default 'agent',
+  created_at   timestamptz not null default now()
+);
+
+-- One row per version of a key. The unique constraint is what makes a
+-- concurrent double-write fail loudly instead of silently producing two
+-- version 3s that later reads would order arbitrarily.
+create unique index if not exists artifacts_key_version_idx
+  on public.artifacts (session_id, artifact_key, version);
+create index if not exists artifacts_session_idx
+  on public.artifacts (session_id, created_at desc);
+
+alter table public.artifacts enable row level security;
+
+drop policy if exists "own artifacts" on public.artifacts;
+create policy "own artifacts" on public.artifacts
+  for all using (
+    exists (select 1 from public.sessions s
+             where s.id = artifacts.session_id and s.user_id = auth.uid()))
+  with check (
+    exists (select 1 from public.sessions s
+             where s.id = artifacts.session_id and s.user_id = auth.uid()));

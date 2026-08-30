@@ -18,6 +18,8 @@ START_DEV_SERVER = "start_dev_server"
 STOP_DEV_SERVER = "stop_dev_server"
 GIT = "git"
 ANALYZE_PROJECT = "analyze_project"
+CREATE_ARTIFACT = "create_artifact"
+UPDATE_ARTIFACT = "update_artifact"
 
 # Maps a tool name to the LangGraph node that executes it.
 #
@@ -40,6 +42,11 @@ TOOL_NODE = {
     # So is the scan: it is one `find` pipeline in the sandbox, and the
     # narrative half is not exposed to the model at all.
     ANALYZE_PROJECT: "bash_tool",
+    # Artifacts touch the database rather than the sandbox, but they are a
+    # write and must not run concurrently with another write to the same key —
+    # which is exactly the ordering rule the file node already enforces.
+    CREATE_ARTIFACT: "file_write",
+    UPDATE_ARTIFACT: "file_write",
 }
 
 TOOLS: list[dict] = [
@@ -293,6 +300,103 @@ TOOLS: list[dict] = [
             "on whatever it turns up that matters."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": CREATE_ARTIFACT,
+        "description": (
+            "Open a document beside the conversation: a file, a page, a "
+            "component, a diagram — something the user will read properly or "
+            "come back to, rather than glance at."
+            + "\n\n" +
+            "Use it when what you are producing is a THING rather than an "
+            "explanation. A component, a config file, a draft email, a README, "
+            "a schema, a landing page. The test is whether the user would want "
+            "to edit it: an artifact can be edited in place and revised across "
+            "turns, and a chat message cannot."
+            + "\n\n" +
+            "Do NOT use it for: a short snippet that illustrates a point, a "
+            "stack trace, command output, or your explanation of something. "
+            "Those belong in your reply, where they are read once and done. A "
+            "five-line example does not become easier to read by moving it "
+            "into a panel."
+            + "\n\n" +
+            "In a Code session, prefer `write_file` for anything that belongs "
+            "in the project itself — an artifact is not a file in the sandbox "
+            "and cannot be run, imported or served. Artifacts are for what the "
+            "user reads, files are for what the computer executes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": (
+                        "A short handle you will reuse to revise this, like "
+                        "`pricing-page`. Lowercase, hyphenated."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": "What it is called, in the panel heading.",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["markdown", "code", "html", "svg", "mermaid"],
+                    "description": (
+                        "`html` renders in a sandboxed frame; `svg` and "
+                        "`mermaid` render as pictures; `code` is highlighted "
+                        "and editable; `markdown` is formatted prose."
+                    ),
+                },
+                "language": {
+                    "type": "string",
+                    "description": (
+                        "For `code`: the language, for highlighting. "
+                        "e.g. python, typescript, sql."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The whole document. Not a fragment.",
+                },
+            },
+            "required": ["id", "title", "kind", "content"],
+        },
+    },
+    {
+        "name": UPDATE_ARTIFACT,
+        "description": (
+            "Revise an artifact you already created, by its id."
+            + "\n\n" +
+            "Send the WHOLE document, not a patch or the changed section — the "
+            "new content replaces the old outright. The previous version is "
+            "kept, so revising is safe and the user can look back."
+            + "\n\n" +
+            "If the user has edited the artifact themselves, you are revising "
+            "their version: read it back to them accurately rather than "
+            "reverting to what you last wrote."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "The handle you gave it when you created it.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The complete new document.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "A new title, if it should change. Omit to keep the "
+                        "current one."
+                    ),
+                },
+            },
+            "required": ["id", "content"],
+        },
     },
     {
         "name": WEB_SEARCH,

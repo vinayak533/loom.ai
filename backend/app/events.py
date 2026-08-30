@@ -28,6 +28,11 @@ SERVER -> CLIENT
 {"type": "file_changed",          "path": "...", "diff": "...",
                                   "content": "...", "change": "created"|"modified"}
 {"type": "file_tree",             "path": "/home/user", "nodes": [...]}
+{"type": "artifact_created",      "key": "pricing-page", "version": 1,
+                                  "kind": "html", "title": "...", "content": "..."}
+{"type": "artifact_updated",      "key": "pricing-page", "version": 2, ...}
+    # Created opens the panel; updated revises it in place. Stealing focus on
+    # every revision is what makes a canvas unusable.
 {"type": "preview_ready",         "url": "https://...", "port": 3000,
                                   "command": "npm run dev"}
 {"type": "preview_error",         "message": "...", "fatal": true|false,
@@ -256,6 +261,31 @@ def git_state(
     """
     return event(
         "git_state", repo=repo, branch=branch or "", status=status, log=log, path=path
+    )
+
+
+def artifact(row: dict, created: bool) -> dict:
+    """A document the model wrote beside the conversation.
+
+    Two types rather than one with a flag, because the client does genuinely
+    different things: a *created* artifact opens its panel, an *updated* one
+    must not — stealing focus mid-read every time the model revises something
+    is the fastest way to make a canvas unusable.
+
+    The full content travels on the event. The alternative is an id the client
+    then fetches, which is a round trip to display something the server already
+    had in hand, on the one path where the user is watching and waiting.
+    """
+    return event(
+        "artifact_created" if created else "artifact_updated",
+        artifact_id=row.get("id") or "",
+        key=row.get("artifact_key") or "",
+        version=int(row.get("version") or 1),
+        kind=row.get("kind") or "markdown",
+        title=row.get("title") or "Untitled",
+        language=row.get("language") or "",
+        content=row.get("content") or "",
+        created_by=row.get("created_by") or "agent",
     )
 
 
