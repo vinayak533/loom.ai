@@ -12,10 +12,11 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import type {
   AgentToolMeta,
+  ArtifactPayload,
+  BranchGroup,
   FileNode,
   GitChange,
   GitCommit,
-  BranchGroup,
   SearchResult,
   ServerEvent,
 } from "./events";
@@ -236,6 +237,23 @@ export type AgentState = {
   treeRoot: string;
   /** Repository state, or null until the server has told us. */
   git: GitState;
+  /**
+   * Documents the model wrote beside the conversation, keyed by their stable
+   * `key`. Only the current version of each is held: the version history is
+   * fetched when someone opens the switcher, which is rare, and keeping every
+   * version in socket state would grow without bound across a long session.
+   */
+  artifacts: Record<string, ArtifactPayload>;
+  /**
+   * The artifact whose panel should open, set once when one is *created* and
+   * cleared by the shell as soon as it has acted on it.
+   *
+   * A signal rather than a state: "which artifact is open" belongs to the
+   * component that owns the panel. If this held it instead, every revision
+   * arriving on the socket would re-assert it and re-open a panel the user had
+   * just closed.
+   */
+  artifactToOpen: string | null;
   changed: Record<string, ChangedFile>;
   /**
    * Files opened for reading that the agent never wrote — from the file tree or
@@ -296,6 +314,8 @@ const initialState: AgentState = {
   tree: [],
   treeRoot: "/home/user",
   git: null,
+  artifacts: {},
+  artifactToOpen: null,
   changed: {},
   viewed: {},
   flash: {},
@@ -353,6 +373,10 @@ type Action =
   | { t: "applyTree"; path: string; nodes: FileNode[] }
   /** A path the user renamed (`to`) or deleted (`to: null`) in the tree. */
   | { t: "pathMoved"; from: string; to: string | null }
+  /** Artifacts fetched over HTTP when a session is reopened. */
+  | { t: "seedArtifacts"; artifacts: ArtifactPayload[] }
+  /** The shell has opened the artifact the create signal named. */
+  | { t: "artifactSignalConsumed" }
   | { t: "reset"; state?: Partial<AgentState> };
 
 let seq = 0;
@@ -503,6 +527,18 @@ function reducer(state: AgentState, action: Action): AgentState {
 
     case "applyTree":
       return { ...state, tree: action.nodes, treeRoot: action.path };
+
+    case "seedArtifacts": {
+      // Fetched rows never win over what the socket already delivered: the
+      // fetch is a page load racing a live conversation, and the socket's copy
+      // is the newer one whenever both exist.
+      const seeded: Record<string, ArtifactPayload> = {};
+      for (const a of action.artifacts) seeded[a.key] = a;
+      return { ...state, artifacts: { ...seeded, ...state.artifacts } };
+    }
+
+    case "artifactSignalConsumed":
+      return { ...state, artifactToOpen: null };
 
     // Renaming or deleting in the tree moves the file the rest of the UI is
     // keyed by. Without this the changed list, the diff panel and the flash map
@@ -796,6 +832,21 @@ function applyEvent(state: AgentState, e: ServerEvent): AgentState {
 
     case "file_tree":
       return { ...state, tree: e.nodes, treeRoot: e.path };
+
+    // Created and updated differ in exactly one way, and it is the important
+    // one: a new artifact opens its panel, a revision does not. Stealing focus
+    // every time the model touches a document the user is reading is the
+    // fastest way to make a canvas unusable.
+    case "artifact_created":
+    case "artifact_updated": {
+      const { type, ts, ...payload } = e;
+      return {
+        ...state,
+        artifacts: { ...state.artifacts, [payload.key]: payload },
+        artifactToOpen:
+          type === "artifact_created" ? payload.key : state.artifactToOpen,
+      };
+    }
 
     case "git_state":
       return {
@@ -1371,6 +1422,14 @@ export function useAgentSocket(
     (from: string, to: string | null) => dispatch({ t: "pathMoved", from, to }),
     [],
   );
+  const seedArtifacts = useCallback(
+    (artifacts: ArtifactPayload[]) => dispatch({ t: "seedArtifacts", artifacts }),
+    [],
+  );
+  const clearArtifactSignal = useCallback(
+    () => dispatch({ t: "artifactSignalConsumed" }),
+    [],
+  );
 
   const busy = useMemo(
     // A run suspended on an approval is still a run: the composer must stay
@@ -1402,5 +1461,7 @@ export function useAgentSocket(
     applyLocalEdit,
     applyTree,
     applyPathMove,
+    seedArtifacts,
+    clearArtifactSignal,
   };
 }

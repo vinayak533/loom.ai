@@ -115,7 +115,10 @@ check(
 section("2. Kinds tolerate the near-misses models produce")
 check("a known kind passes", artifacts.normalise_kind("html", None) == "html")
 check("md -> markdown", artifacts.normalise_kind("md", None) == "markdown")
-check("diagram -> mermaid", artifacts.normalise_kind("diagram", None) == "mermaid")
+check(
+    "an unknown kind falls back to markdown, not to a kind nothing renders",
+    artifacts.normalise_kind("diagram", None) == "markdown",
+)
 check("react -> code", artifacts.normalise_kind("react", None) == "code")
 check(
     "a language with no kind means code",

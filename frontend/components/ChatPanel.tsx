@@ -85,10 +85,16 @@ export function ChatPanel({
   taskRouted,
   onSelectModel,
   onImported,
+  onOpenArtifact,
 }: {
   sessionId: string;
   token?: string | null;
   section: Section;
+  /**
+   * Reopen an artifact by key. Absent on a surface with no artifacts, which is
+   * why the strip below renders nothing rather than a dead row of chips.
+   */
+  onOpenArtifact?: (key: string) => void;
   userName: string;
   state: AgentState;
   busy: boolean;
@@ -589,6 +595,34 @@ export function ChatPanel({
                       setSources((prev) => prev.filter((s) => s.id !== id))
                     }
                   />
+                </div>
+              )}
+
+              {/* Artifacts the model has written this session.
+                  Above the composer rather than in the transcript: an artifact
+                  outlives the turn that produced it, and burying the way back
+                  to it under a scroll of later messages is what makes a canvas
+                  feel like it lost your work. */}
+              {onOpenArtifact && Object.keys(state.artifacts).length > 0 && (
+                <div className="flex flex-wrap gap-1.5 px-3 pt-3">
+                  {Object.values(state.artifacts).map((a) => (
+                    <button
+                      key={a.key}
+                      type="button"
+                      onClick={() => onOpenArtifact(a.key)}
+                      title={`${a.title} · version ${a.version}`}
+                      className="flex max-w-full items-center gap-1.5 rounded-full border
+                                 border-line bg-inset px-2.5 py-1 text-2xs text-ink-muted
+                                 transition-colors duration-150 hover:border-accent-line
+                                 hover:text-ink"
+                    >
+                      <span className="sigil h-1.5 w-1.5 shrink-0 bg-accent" aria-hidden />
+                      <span className="truncate">{a.title}</span>
+                      {a.version > 1 && (
+                        <span className="shrink-0 text-ink-faint">v{a.version}</span>
+                      )}
+                    </button>
+                  ))}
                 </div>
               )}
 

@@ -4,6 +4,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useProjects } from "@/lib/useProjects";
 import { ProjectPanel } from "@/components/projects/ProjectPanel";
+import { ArtifactPanel } from "@/components/artifacts/ArtifactPanel";
+import { listArtifacts, toPayload } from "@/lib/artifacts";
 import {
   AUTO_MODEL_ID,
   DEFAULT_MODEL_ID,
@@ -144,6 +146,14 @@ export default function Page() {
   const projects = useProjects(token, auth.signedIn);
   /** Which project's panel is open, or null. Not a route: it is a dialog. */
   const [projectPanel, setProjectPanel] = useState<string | null>(null);
+  /**
+   * Which artifact is open.
+   *
+   * Owned here rather than in socket state, so that a revision arriving while
+   * the user has the panel closed does not re-open it. The socket only raises
+   * a one-shot `artifactToOpen` signal on *creation*; this consumes it.
+   */
+  const [openArtifact, setOpenArtifact] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** The keyboard reference, opened with `?` or from Settings. */
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -290,6 +300,8 @@ export default function Page() {
     applyLocalEdit,
     applyTree,
     applyPathMove,
+    seedArtifacts,
+    clearArtifactSignal,
   } = useAgentSocket(sessionId, token, null, convSection);
 
   // --- bootstrap -----------------------------------------------------------
@@ -617,6 +629,34 @@ export default function Page() {
     },
     [projects, refreshSessions],
   );
+
+  // A newly created artifact opens itself; a revision does not. The signal is
+  // consumed immediately so it cannot re-fire on an unrelated re-render.
+  useEffect(() => {
+    if (!state.artifactToOpen) return;
+    setOpenArtifact(state.artifactToOpen);
+    clearArtifactSignal();
+  }, [state.artifactToOpen, clearArtifactSignal]);
+
+  /**
+   * Artifacts written in earlier sessions of this conversation.
+   *
+   * The socket carries everything written *during* a conversation, but a
+   * session reopened after a reload has artifacts nobody is going to re-emit —
+   * so they are fetched once per session and seeded into socket state.
+   */
+  useEffect(() => {
+    if (!sessionId) return;
+    let live = true;
+    listArtifacts(sessionId, token)
+      .then((rows) => {
+        if (live && rows.length) seedArtifacts(rows.map(toPayload));
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [sessionId, token, seedArtifacts]);
 
   const removeSession = useCallback(
     async (id: string) => {
@@ -1418,6 +1458,18 @@ export default function Page() {
       />
 
       <AnimatePresence>
+        {openArtifact && state.artifacts[openArtifact] && sessionId && (
+          <ArtifactPanel
+            key={openArtifact}
+            artifact={state.artifacts[openArtifact]}
+            sessionId={sessionId}
+            token={token}
+            onClose={() => setOpenArtifact(null)}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {projectPanel && (
           <ProjectPanel
             key={projectPanel}
@@ -1711,6 +1763,7 @@ export default function Page() {
               taskRouted={taskRouted}
               onSelectModel={chooseModel}
               onImported={onImported}
+              onOpenArtifact={setOpenArtifact}
             />
           )}
 

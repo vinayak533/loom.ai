@@ -42,13 +42,27 @@ export function CodeEditor({
   value,
   onSave,
   className,
+  destination = "the sandbox",
+  readOnly = false,
 }: {
   /** Drives syntax highlighting, and re-seeds the buffer when it changes. */
   path: string;
   value: string;
-  /** Resolves when the sandbox has the new content. Rejects with a message. */
+  /** Resolves when the save has landed. Rejects with a message. */
   onSave: (content: string) => Promise<void>;
   className?: string;
+  /**
+   * Where a save goes, named in the status line.
+   *
+   * This editor was written for sandbox files and said so in three places. It
+   * now also edits artifacts, which save as a new version in the database and
+   * never touch the sandbox at all — so a hardcoded "Autosaves to the sandbox"
+   * was simply false half the time it appeared. Naming the destination is
+   * cheaper than two editors.
+   */
+  destination?: string;
+  /** Read-only, for content that exists but must not be edited here. */
+  readOnly?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<any>(null);
@@ -62,6 +76,11 @@ export function CodeEditor({
   // calls the current handler rather than the one captured on the first render.
   const saveRef = useRef(onSave);
   saveRef.current = onSave;
+  // Same reason as `saveRef`: the CodeMirror state is built once, at mount, so
+  // anything it reads has to come through a ref rather than a closure over the
+  // first render's props.
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
 
   /** The pending autosave. One at a time, always for the latest document. */
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -138,6 +157,11 @@ export function CodeEditor({
           syntaxHighlighting(highlightStyle(cmLanguage.HighlightStyle, tags)),
           cmSearch.highlightSelectionMatches(),
           EditorState.allowMultipleSelections.of(true),
+          // Read-only means the document cannot be *changed*, not that it
+          // cannot be reached: `readOnly` leaves the cursor, selection and
+          // copying intact, which `editable.of(false)` would take away. A
+          // history version has to stay selectable to be useful at all.
+          EditorState.readOnly.of(readOnlyRef.current),
           EditorView.lineWrapping,
           keymap.of([
             // Save comes first so it wins over anything the defaults bind.
@@ -267,13 +291,15 @@ export function CodeEditor({
         message={message}
         onSave={saveNow}
         onRevert={revert}
-        disabled={!ready}
+        disabled={!ready || readOnly}
+        destination={destination}
       />
     </div>
   );
 }
 
 function SaveBar({
+  destination,
   status,
   message,
   onSave,
@@ -285,6 +311,7 @@ function SaveBar({
   onSave: () => void;
   onRevert: () => void;
   disabled: boolean;
+  destination: string;
 }) {
   const dirty = status === "dirty" || status === "error";
 
@@ -314,10 +341,10 @@ function SaveBar({
           (status === "saving"
             ? "Saving…"
             : status === "saved"
-              ? "Saved to the sandbox"
+              ? `Saved to ${destination}`
               : dirty
                 ? "Unsaved — saving shortly"
-                : "Autosaves to the sandbox")}
+                : `Autosaves to ${destination}`)}
       </span>
 
       {dirty && (

@@ -1282,8 +1282,11 @@ async def _broadcast_tree(session_id: str, why: str) -> None:
     """
     try:
         tree = await workspace.list_tree(session_id)
-        emitter = emitter_registry.get(session_id)
-        if emitter:
+        # `for_session`, not `get`: the registry is keyed by emitter id, and
+        # `get(session_id)` silently returns None — which is exactly how this
+        # broadcast came to never fire at all.
+        emitter = emitter_registry.for_session(session_id)
+        if emitter and not emitter.closed:
             emitter.emit(ev.file_tree(tree["path"], tree["nodes"]))
     except Exception:  # noqa: BLE001 - see docstring
         log.debug("Could not refresh tree after %s", why, exc_info=True)
@@ -1505,7 +1508,8 @@ async def save_artifact(
     except artifacts.ArtifactError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
-    emitter = emitter_registry.get(session_id)
-    if emitter:
+    # `for_session`, not `get` — see the note in `_broadcast_tree`.
+    emitter = emitter_registry.for_session(session_id)
+    if emitter and not emitter.closed:
         emitter.emit(ev.artifact(row, created=False))
     return row

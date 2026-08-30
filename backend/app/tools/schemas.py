@@ -341,11 +341,11 @@ TOOLS: list[dict] = [
                 },
                 "kind": {
                     "type": "string",
-                    "enum": ["markdown", "code", "html", "svg", "mermaid"],
+                    "enum": ["markdown", "code", "html", "svg"],
                     "description": (
-                        "`html` renders in a sandboxed frame; `svg` and "
-                        "`mermaid` render as pictures; `code` is highlighted "
-                        "and editable; `markdown` is formatted prose."
+                        "`html` renders in a sandboxed frame; `svg` renders "
+                        "as a picture; `code` is highlighted and editable; "
+                        "`markdown` is formatted prose."
                     ),
                 },
                 "language": {

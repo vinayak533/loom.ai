@@ -41,7 +41,12 @@ log = logging.getLogger(__name__)
 
 #: Kinds the UI knows how to render. A kind it does not recognise falls back to
 #: plain text rather than failing, but the model is only told about these.
-KINDS = ("markdown", "code", "html", "svg", "mermaid")
+#: `mermaid` is deliberately absent. There is no mermaid renderer in this
+#: frontend, so offering it would produce a "diagram" that displays as its own
+#: source — a plausible-looking capability that does not work, which this
+#: codebase already refuses elsewhere (see the Deploy button in ProjectPulse).
+#: Add the renderer first, then add the kind.
+KINDS = ("markdown", "code", "html", "svg")
 
 #: Ceiling on one artifact's content. Generous — an artifact is meant to be
 #: long — but not unbounded: the content round-trips through the websocket and
@@ -90,7 +95,6 @@ def normalise_kind(raw: str | None, language: str | None) -> str:
         "text": "markdown",
         "document": "markdown",
         "doc": "markdown",
-        "diagram": "mermaid",
         "react": "code",
         "component": "code",
         "webpage": "html",
