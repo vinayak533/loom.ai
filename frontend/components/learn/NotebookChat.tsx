@@ -138,7 +138,7 @@ export function NotebookChat({
         <div
           className={cn(
             "glass rounded-card transition-colors duration-200",
-            "focus-within:border-accent-line focus-within:shadow-[0_0_0_3px_rgb(var(--acc)/0.10)]",
+            "focus-within:border-line-focus focus-within:shadow-[0_0_0_3px_rgba(255,255,255,0.055)]",
           )}
         >
           <textarea
@@ -158,7 +158,7 @@ export function NotebookChat({
             }
             className="scroll-thin block w-full resize-none bg-transparent px-3.5 pt-3 font-sans
                        text-[0.875rem] leading-relaxed text-ink placeholder:text-ink-faint
-                       focus:outline-none disabled:opacity-50"
+                       focus:outline-none focus-visible:shadow-none disabled:opacity-50"
           />
           <div className="flex items-center gap-2 px-3 pb-2.5 pt-1.5">
             <span className="voice-machine truncate text-ink-faint">

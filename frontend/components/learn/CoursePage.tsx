@@ -327,7 +327,7 @@ function ExamRow({
         disabled={locked}
         onClick={() => onOpen(exam.id)}
         className={cn(
-          "h-8 shrink-0 rounded-ctl px-3.5 text-[0.8125rem] font-semibold transition-all duration-200",
+          "h-8 touch:h-11 shrink-0 rounded-ctl px-3.5 text-[0.8125rem] font-semibold transition-all duration-200",
           locked
             ? "cursor-not-allowed border border-line text-ink-dim"
             : "bg-accent-alt text-accent-ink hover:brightness-110 active:scale-[0.98]",

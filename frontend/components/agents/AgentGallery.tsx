@@ -88,10 +88,10 @@ export function AgentGallery({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Filter by name, role or tool…"
-                className="h-9 w-full rounded-ctl border border-line bg-elevated pl-9 pr-3
+                className="h-9 touch:h-11 w-full rounded-ctl border border-line bg-elevated pl-9 pr-3
                            font-sans text-[0.8125rem] text-ink placeholder:text-ink-faint
                            transition-colors duration-200 hover:border-line-strong
-                           focus:border-accent-line focus:outline-none"
+                           focus:border-line-focus focus:outline-none"
               />
             </label>
 
@@ -161,7 +161,7 @@ export function AgentGallery({
 
               <div className="relative flex items-start gap-3">
                 <span
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-ctl border"
+                  className="grid h-9 w-9 touch:h-11 touch:w-11 shrink-0 place-items-center rounded-ctl border"
                   style={{
                     borderColor: `${agent.accent}38`,
                     backgroundColor: `${agent.accent}14`,

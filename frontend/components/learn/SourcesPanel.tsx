@@ -24,11 +24,14 @@ export type AddPayload =
 export function SourcesPanel({
   sources,
   busy,
+  busyLabel,
   onAdd,
   onRemove,
 }: {
   sources: NotebookSource[];
   busy: boolean;
+  /** What is being read right now, when the caller knows. */
+  busyLabel?: string | null;
   onAdd: (payload: AddPayload) => void;
   onRemove: (id: string) => void;
 }) {
@@ -124,7 +127,7 @@ export function SourcesPanel({
                   placeholder="https://… or a YouTube link"
                   aria-label="Source URL"
                   className="h-9 w-full rounded-ctl border border-line bg-inset px-2.5 font-mono text-2xs
-                             text-ink placeholder:text-ink-faint focus:border-accent-line focus:outline-none"
+                             text-ink placeholder:text-ink-faint focus:border-line-focus focus:outline-none"
                 />
               ) : (
                 <textarea
@@ -143,7 +146,7 @@ export function SourcesPanel({
                   aria-label="Source text"
                   className="scroll-thin w-full resize-none rounded-ctl border border-line bg-inset px-2.5 py-2
                              text-[0.8125rem] leading-relaxed text-ink placeholder:text-ink-faint
-                             focus:border-accent-line focus:outline-none"
+                             focus:border-line-focus focus:outline-none"
                 />
               )}
               <div className="mt-1.5 flex gap-1.5">
@@ -196,7 +199,9 @@ export function SourcesPanel({
               transition={{ duration: 1.2, repeat: Infinity }}
               aria-hidden
             />
-            <span className="text-2xs text-ink-muted">Reading and indexing…</span>
+            <span className="min-w-0 truncate text-2xs text-ink-muted">
+              {busyLabel ? `Reading ${busyLabel}…` : "Reading and indexing…"}
+            </span>
           </div>
         )}
 
@@ -273,13 +278,17 @@ function SourceRow({
           </p>
         </div>
       </div>
+      {/* Revealed on hover on a pointer device, and simply *present* on a
+          touch one: `group-hover` never fires without a mouse, so on a phone
+          this control did not exist. `@media (hover: hover)` is the only thing
+          that tells those two cases apart. */}
       <button
         type="button"
         aria-label={`Remove ${source.title}`}
         onClick={() => onRemove(source.id)}
-        className="absolute right-1.5 top-1.5 grid h-5 w-5 place-items-center rounded text-ink-faint
-                   opacity-0 transition-all duration-200 hover:text-del focus-visible:opacity-100
-                   group-hover:opacity-100"
+        className="absolute right-1.5 top-1.5 grid h-7 w-7 place-items-center rounded text-ink-faint
+                   transition-all duration-200 hover:text-del focus-visible:opacity-100
+                   [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden>
           <path d="m6 6 12 12M18 6 6 18" />

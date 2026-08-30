@@ -1,10 +1,11 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ModelOption } from "@/lib/api";
 import { uploadFile } from "@/lib/api";
 import type { AgentSummary } from "@/lib/agents";
+import type { BranchGroup } from "@/lib/events";
 import { formatCredits } from "@/lib/agents";
 import type { AgentState, ChatItem } from "@/lib/useAgentSocket";
 import { cn } from "@/lib/cn";
@@ -14,6 +15,11 @@ import { ModelSelector } from "../ModelSelector";
 import { SourceChips } from "../SourceChips";
 import { ToolCallCard } from "../ToolCallCard";
 import { TraceRow, TraceTail } from "../TraceSpine";
+import {
+  AssistantActions,
+  MessageEditor,
+  UserActions,
+} from "../MessageActions";
 import { AgentIcon } from "./AgentIcon";
 import { AgentOutput } from "./AgentOutputs";
 import { ApprovalCard } from "./ApprovalCard";
@@ -50,6 +56,9 @@ export function AgentChat({
   onSeedConsumed,
   onSend,
   onCancel,
+  onEditMessage,
+  onRegenerate,
+  onSwitchBranch,
   onSelectModel,
   onResolveApproval,
   onHandoff,
@@ -70,6 +79,10 @@ export function AgentChat({
   onSeedConsumed?: () => void;
   onSend: (text: string, fileIds: string[]) => boolean;
   onCancel: () => void;
+  /** Same three actions the Chat and Code sections offer; see `ChatPanel`. */
+  onEditMessage?: (turnIndex: number, text: string) => void;
+  onRegenerate?: () => void;
+  onSwitchBranch?: (turnIndex: number, version: number) => void;
   onSelectModel: (id: string | null) => void;
   onResolveApproval: (
     approvalId: string,
@@ -80,6 +93,8 @@ export function AgentChat({
   onBack: () => void;
 }) {
   const [draft, setDraft] = useState("");
+  /** The user turn open for editing, by ordinal. Null when none is. */
+  const [editingTurn, setEditingTurn] = useState<number | null>(null);
   const [sources, setSources] = useState<LearningSource[]>([]);
   const [uploading, setUploading] = useState(false);
   const [showTools, setShowTools] = useState(false);
@@ -169,6 +184,49 @@ export function AgentChat({
     () =>
       state.items.filter((i) => !(i.kind === "assistant" && !i.text && !i.thinking)),
     [state.items],
+  );
+
+  // Turn ordinals and branch groups, exactly as `ChatPanel` derives them — the
+  // coordinate has to be the same on both surfaces because the backend that
+  // answers both is counting the same thing.
+  const turnIndexOf = useMemo(() => {
+    const map = new Map<string, number>();
+    let n = 0;
+    for (const item of visible) {
+      if (item.kind === "user") map.set(item.id, n++);
+    }
+    return map;
+  }, [visible]);
+
+  const branchAt = useMemo(() => {
+    const map = new Map<number, BranchGroup>();
+    for (const group of state.branches) map.set(group.turn_index, group);
+    return map;
+  }, [state.branches]);
+
+  const lastAssistantId = useMemo(() => {
+    for (let i = visible.length - 1; i >= 0; i--) {
+      if (visible[i].kind === "assistant") return visible[i].id;
+    }
+    return null;
+  }, [visible]);
+
+  const startEdit = useCallback((turnIndex: number) => setEditingTurn(turnIndex), []);
+  const cancelEdit = useCallback(() => setEditingTurn(null), []);
+  const submitEdit = useCallback(
+    (turnIndex: number, text: string) => {
+      setEditingTurn(null);
+      onEditMessage?.(turnIndex, text);
+    },
+    [onEditMessage],
+  );
+  const regenerate = useCallback(() => onRegenerate?.(), [onRegenerate]);
+  const switchBranch = useCallback(
+    (turnIndex: number, version: number) => {
+      setEditingTurn(null);
+      onSwitchBranch?.(turnIndex, version);
+    },
+    [onSwitchBranch],
   );
 
   const streamingAssistant = hasOpenAssistant(state.items);
@@ -353,6 +411,23 @@ export function AgentChat({
               first={i === 0}
               last={!tail && i === lastIndex}
               extending={busy && !tail && i === lastIndex}
+              busy={busy}
+              turnIndex={turnIndexOf.get(item.id)}
+              branch={
+                turnIndexOf.get(item.id) === undefined
+                  ? undefined
+                  : branchAt.get(turnIndexOf.get(item.id)!)
+              }
+              editing={
+                turnIndexOf.get(item.id) !== undefined &&
+                turnIndexOf.get(item.id) === editingTurn
+              }
+              isLastAssistant={item.id === lastAssistantId}
+              onStartEdit={startEdit}
+              onCancelEdit={cancelEdit}
+              onSubmitEdit={submitEdit}
+              onRegenerate={regenerate}
+              onSwitchBranch={switchBranch}
               onResolveApproval={onResolveApproval}
               onHandoff={onHandoff}
             />
@@ -412,7 +487,7 @@ export function AgentChat({
             className={cn(
               "glass relative rounded-card transition-colors duration-200",
               "hover:border-line-strong",
-              "focus-within:border-accent-line focus-within:shadow-[0_0_0_3px_rgb(var(--acc)/0.10),0_24px_60px_-20px_rgba(0,0,0,0.82)]",
+              "focus-within:border-line-focus focus-within:shadow-[0_0_0_3px_rgba(255,255,255,0.055),0_24px_60px_-20px_rgba(0,0,0,0.82)]",
             )}
           >
             {sources.length > 0 && (
@@ -445,7 +520,8 @@ export function AgentChat({
               disabled={!state.connected}
               className="scroll-thin block w-full resize-none bg-transparent px-4 pt-3.5
                          font-sans text-[0.9375rem] leading-relaxed text-ink
-                         placeholder:text-ink-faint focus:outline-none disabled:opacity-50"
+                         placeholder:text-ink-faint focus:outline-none focus-visible:shadow-none
+                         disabled:opacity-50"
             />
 
             <div className="flex items-center gap-1 px-3 pb-2.5 pt-2">
@@ -564,6 +640,16 @@ function Row({
   first,
   last,
   extending,
+  busy,
+  turnIndex,
+  branch,
+  editing,
+  isLastAssistant,
+  onStartEdit,
+  onCancelEdit,
+  onSubmitEdit,
+  onRegenerate,
+  onSwitchBranch,
   onResolveApproval,
   onHandoff,
 }: {
@@ -573,6 +659,16 @@ function Row({
   first: boolean;
   last: boolean;
   extending: boolean;
+  busy: boolean;
+  turnIndex?: number;
+  branch?: BranchGroup;
+  editing: boolean;
+  isLastAssistant: boolean;
+  onStartEdit: (turnIndex: number) => void;
+  onCancelEdit: () => void;
+  onSubmitEdit: (turnIndex: number, text: string) => void;
+  onRegenerate: () => void;
+  onSwitchBranch: (turnIndex: number, version: number) => void;
   onResolveApproval: (
     approvalId: string,
     decision: "approved" | "edited" | "rejected",
@@ -582,9 +678,20 @@ function Row({
 }) {
   switch (item.kind) {
     case "user":
+      if (editing && turnIndex !== undefined) {
+        return (
+          <TraceRow kind="user" first={first} last={last} extending={extending} align="end">
+            <MessageEditor
+              initial={item.text}
+              onSave={(text) => onSubmitEdit(turnIndex, text)}
+              onCancel={onCancelEdit}
+            />
+          </TraceRow>
+        );
+      }
       return (
         <TraceRow kind="user" first={first} last={last} extending={extending} align="end">
-          <div className="flex max-w-[80%] flex-col items-end gap-2">
+          <div className="group/msg relative flex max-w-[80%] flex-col items-end gap-2">
             {item.files.length > 0 && (
               <span className="chip">
                 {item.files.length} attachment{item.files.length === 1 ? "" : "s"}
@@ -594,6 +701,15 @@ function Row({
               <div className="max-w-full rounded-bubble rounded-br-[6px] border border-line bg-raised px-4 py-2.5">
                 <p className="voice-said whitespace-pre-wrap">{item.text}</p>
               </div>
+            )}
+            {turnIndex !== undefined && (
+              <UserActions
+                text={item.text}
+                branch={branch}
+                busy={busy}
+                onEdit={() => onStartEdit(turnIndex)}
+                onSwitch={(version) => onSwitchBranch(turnIndex, version)}
+              />
             )}
           </div>
         </TraceRow>
@@ -608,7 +724,17 @@ function Row({
           extending={extending}
           live={item.streaming}
         >
-          <AssistantBody item={item} agentId={agent.id} onHandoff={onHandoff} />
+          <div className="group/msg relative min-w-0">
+            <AssistantBody item={item} agentId={agent.id} onHandoff={onHandoff} />
+            {!item.streaming && item.text && (
+              <AssistantActions
+                text={item.text}
+                canRegenerate={isLastAssistant}
+                busy={busy}
+                onRegenerate={onRegenerate}
+              />
+            )}
+          </div>
         </TraceRow>
       );
 
@@ -711,7 +837,11 @@ function AssistantBody({
             type="button"
             onClick={() => setShowThinking((s) => !s)}
             aria-expanded={showThinking}
-            className="voice-label flex items-center gap-1.5 transition-colors hover:text-ink-muted"
+            // The label is 10px tall; the control it sits in must not be. The
+            // negative margin keeps the row's visual position unchanged while
+            // giving the disclosure a real hit area.
+            className="voice-label -my-2 flex min-h-[36px] items-center gap-1.5 transition-colors
+                       hover:text-ink-muted touch:min-h-[44px]"
           >
             <motion.span
               animate={{ rotate: showThinking ? 90 : 0 }}

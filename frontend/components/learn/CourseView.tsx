@@ -174,8 +174,8 @@ export function CourseView({
               value={active.id}
               onChange={(e) => setActiveId(e.target.value)}
               aria-label="Section"
-              className="mb-5 h-9 w-full rounded-ctl border border-line bg-elevated px-2.5
-                         text-[0.8125rem] text-ink focus:border-accent-line focus:outline-none md:hidden"
+              className="mb-5 h-9 touch:h-11 w-full rounded-ctl border border-line bg-elevated px-2.5
+                         text-[0.8125rem] text-ink focus:border-line-focus focus:outline-none md:hidden"
             >
               {lessons.map((l, i) => (
                 <option key={l.id} value={l.id}>

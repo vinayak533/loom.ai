@@ -37,6 +37,7 @@ export function NotebookWorkspace({
   turns,
   asking,
   addingSource,
+  addingLabel,
   generating,
   modelName,
   onBack,
@@ -61,6 +62,8 @@ export function NotebookWorkspace({
   turns: NotebookTurn[];
   asking: boolean;
   addingSource: boolean;
+  /** The file currently being read, when one is. */
+  addingLabel?: string | null;
   generating: boolean;
   modelName: string | null;
   onBack: () => void;
@@ -183,6 +186,7 @@ export function NotebookWorkspace({
               <SourcesPanel
                 sources={sources}
                 busy={addingSource}
+                busyLabel={addingLabel}
                 onAdd={onAddSource}
                 onRemove={onRemoveSource}
               />
@@ -240,6 +244,7 @@ export function NotebookWorkspace({
                       <SourcesPanel
                         sources={sources}
                         busy={addingSource}
+                        busyLabel={addingLabel}
                         onAdd={onAddSource}
                         onRemove={onRemoveSource}
                       />

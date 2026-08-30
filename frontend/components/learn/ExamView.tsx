@@ -113,7 +113,7 @@ export function ExamView({
                 aria-label={`Question ${i + 1}${isAnswered ? ", answered" : ""}`}
                 aria-current={i === index}
                 className={cn(
-                  "h-7 w-7 rounded-ctl border font-mono text-[0.6875rem] transition-colors duration-150",
+                  "h-7 w-7 touch:h-11 touch:w-11 rounded-ctl border font-mono text-[0.6875rem] transition-colors duration-150",
                   i === index
                     ? "border-accent bg-accent text-accent-ink"
                     : isAnswered

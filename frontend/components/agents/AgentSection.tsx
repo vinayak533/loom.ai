@@ -10,6 +10,12 @@ import {
 } from "@/lib/api";
 import type { AgentSummary, CreditBalance } from "@/lib/agents";
 import {
+  clearLive,
+  forgetPersistedLive,
+  readLive,
+  writeLive,
+} from "@/lib/liveSession";
+import {
   AGENT_ACTIVE_KEY,
   AGENT_SESSION_KEY,
   createAgentSession,
@@ -67,6 +73,9 @@ export function AgentSection({
     busy,
     send,
     cancel,
+    editMessage,
+    regenerate,
+    switchBranch,
     setModel,
     resolveApproval,
   } = useAgentSocket(sessionId, token, activeAgent);
@@ -106,11 +115,16 @@ export function AgentSection({
     setCredits((c) => (c && c.balance !== liveBalance ? { ...c, balance: liveBalance } : c));
   }, [liveBalance]);
 
+  // Per browsing session, not forever — the same rule Chat and Code follow.
+  // A reload puts you back with the specialist you were talking to; opening
+  // the app afresh puts you back in the gallery, with every past conversation
+  // still one click away in the shelf. See `lib/liveSession`.
   useEffect(() => {
+    forgetPersistedLive(AGENT_SESSION_KEY, AGENT_ACTIVE_KEY);
     try {
-      const stored = localStorage.getItem(AGENT_SESSION_KEY);
+      const stored = readLive(AGENT_SESSION_KEY);
       if (stored) setSessions(JSON.parse(stored));
-      const active = localStorage.getItem(AGENT_ACTIVE_KEY);
+      const active = readLive(AGENT_ACTIVE_KEY);
       if (active) setActiveAgent(active);
     } catch {
       // A corrupt value is not worth failing the section over; the gallery is
@@ -120,7 +134,7 @@ export function AgentSection({
 
   useEffect(() => {
     if (Object.keys(sessions).length) {
-      localStorage.setItem(AGENT_SESSION_KEY, JSON.stringify(sessions));
+      writeLive(AGENT_SESSION_KEY, JSON.stringify(sessions));
     }
   }, [sessions]);
 
@@ -129,7 +143,7 @@ export function AgentSection({
   const openAgent = useCallback(
     async (agentId: string, seedContext?: string) => {
       setActiveAgent(agentId);
-      localStorage.setItem(AGENT_ACTIVE_KEY, agentId);
+      writeLive(AGENT_ACTIVE_KEY, agentId);
       setShelfOpen(false);
       if (seedContext) setSeed(seedContext);
 
@@ -259,7 +273,7 @@ export function AgentSection({
 
   const backToGallery = useCallback(() => {
     setActiveAgent(null);
-    localStorage.removeItem(AGENT_ACTIVE_KEY);
+    clearLive(AGENT_ACTIVE_KEY);
     setShelfOpen(false);
     refreshCredits();
   }, [refreshCredits]);
@@ -316,6 +330,9 @@ export function AgentSection({
           onSeedConsumed={() => setSeed(null)}
           onSend={send}
           onCancel={cancel}
+          onEditMessage={editMessage}
+          onRegenerate={regenerate}
+          onSwitchBranch={switchBranch}
           onSelectModel={chooseModel}
           onResolveApproval={resolveApproval}
           onHandoff={handoff}

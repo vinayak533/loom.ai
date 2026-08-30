@@ -116,7 +116,7 @@ export function ExamResults({
               aria-selected={tab === key}
               onClick={() => setTab(key)}
               className={cn(
-                "h-8 rounded-full px-3.5 text-[0.8125rem] font-medium transition-colors duration-200",
+                "h-8 touch:h-11 rounded-full px-3.5 text-[0.8125rem] font-medium transition-colors duration-200",
                 tab === key
                   ? "bg-accent text-accent-ink"
                   : "text-ink-muted hover:bg-elevated hover:text-ink",

@@ -43,6 +43,7 @@ export function NotebookLibrary({
   onOpen,
   onCreate,
   onAction,
+  onBrowseCourses,
 }: {
   notebooks: Notebook[];
   loading: boolean;
@@ -51,6 +52,8 @@ export function NotebookLibrary({
   onOpen: (id: string) => void;
   onCreate: () => void;
   onAction: (id: string, action: HistoryAction) => void;
+  /** Switch to the Courses tab. Offered from the first-run empty state only. */
+  onBrowseCourses?: () => void;
 }) {
   const [tab, setTab] = useState<LibraryTab>("all");
   const [sort, setSort] = useState<SortKey>("recent");
@@ -184,7 +187,7 @@ export function NotebookLibrary({
                     placeholder="Search notebooks…"
                     aria-label="Search notebooks"
                     className="h-8 min-w-0 rounded-ctl border border-line bg-elevated px-2.5 text-[0.8125rem]
-                               text-ink placeholder:text-ink-faint focus:border-accent-line focus:outline-none"
+                               text-ink placeholder:text-ink-faint focus:border-line-focus focus:outline-none"
                   />
                 )}
               </AnimatePresence>
@@ -269,6 +272,18 @@ export function NotebookLibrary({
                   : "Create one, drop in a PDF, a link or some text, and ask it questions."
             }
             action={!query && !archivedView ? { label: "Create your first notebook", onClick: onCreate } : undefined}
+            secondary={
+              !query && !archivedView && onBrowseCourses
+                ? {
+                    label: "Browse the courses",
+                    hint:
+                      "Nothing of your own to hand? Ten authored courses are " +
+                      "already here — Python, TypeScript, React, SQL, Git, " +
+                      "system design and more, each with chapters and an exam.",
+                    onClick: onBrowseCourses,
+                  }
+                : undefined
+            }
           />
         ) : (
           <ul
@@ -507,10 +522,20 @@ function EmptyState({
   title,
   body,
   action,
+  secondary,
 }: {
   title: string;
   body: string;
   action?: { label: string; onClick: () => void };
+  /**
+   * A second way out, for the first-run case.
+   *
+   * Someone opening Learn for the first time has no PDFs to drop in and no
+   * reason to know that ten authored courses are sitting one tab away. An
+   * empty grid that only offers "create a notebook" asks them for material
+   * they do not have yet, which is the least useful thing this screen can do.
+   */
+  secondary?: { label: string; hint: string; onClick: () => void };
 }) {
   return (
     <div className="grid place-items-center rounded-card border border-dashed border-line py-16 text-center">
@@ -529,6 +554,21 @@ function EmptyState({
         >
           {action.label}
         </button>
+      )}
+      {secondary && (
+        <div className="mt-5 border-t border-line pt-4">
+          <p className="mb-2 max-w-[44ch] text-2xs leading-relaxed text-ink-faint">
+            {secondary.hint}
+          </p>
+          <button
+            type="button"
+            onClick={secondary.onClick}
+            className="text-[0.8125rem] font-medium text-accent transition-opacity
+                       duration-200 hover:opacity-80"
+          >
+            {secondary.label} →
+          </button>
+        </div>
       )}
     </div>
   );

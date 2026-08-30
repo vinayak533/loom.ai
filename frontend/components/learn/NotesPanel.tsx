@@ -71,7 +71,7 @@ export function NotesPanel({
                 placeholder="Write a note. Markdown works."
                 className="scroll-thin w-full resize-none rounded-ctl border border-line bg-inset px-2.5 py-2
                            text-[0.8125rem] leading-relaxed text-ink placeholder:text-ink-faint
-                           focus:border-accent-line focus:outline-none"
+                           focus:border-line-focus focus:outline-none"
               />
               <div className="mt-1.5 flex gap-1.5">
                 <button
@@ -199,7 +199,7 @@ function NoteCard({
             }}
             rows={6}
             className="scroll-thin w-full resize-none rounded-ctl border border-line bg-inset px-2 py-1.5
-                       text-[0.8125rem] leading-relaxed text-ink focus:border-accent-line focus:outline-none"
+                       text-[0.8125rem] leading-relaxed text-ink focus:border-line-focus focus:outline-none"
           />
           <div className="mt-1.5 flex gap-1.5">
             <button

@@ -81,7 +81,7 @@ export function LearnSection({ token }: { token: string | null }) {
               aria-selected={surface === key}
               onClick={() => select(key)}
               className={cn(
-                "h-7 rounded-[calc(var(--r-ctl)-2px)] px-3 text-2xs font-medium",
+                "h-7 touch:h-11 rounded-[calc(var(--r-ctl)-2px)] px-3 text-2xs font-medium",
                 "transition-colors duration-200",
                 surface === key
                   ? "bg-raised text-ink"
@@ -98,7 +98,10 @@ export function LearnSection({ token }: { token: string | null }) {
         {surface === "courses" ? (
           <CoursePlatform token={token} />
         ) : (
-          <NotebookSection token={token} />
+          <NotebookSection
+            token={token}
+            onBrowseCourses={() => select("courses")}
+          />
         )}
       </div>
     </div>
@@ -118,7 +121,14 @@ export function LearnSection({ token }: { token: string | null }) {
  * notebook keeps things on purpose; a transcript that survived reloads without
  * anyone asking it to would quietly become a second, worse notes panel.
  */
-function NotebookSection({ token }: { token: string | null }) {
+function NotebookSection({
+  token,
+  onBrowseCourses,
+}: {
+  token: string | null;
+  /** Hands control back to the Courses tab, for the first-run empty state. */
+  onBrowseCourses: () => void;
+}) {
   const [config, setConfig] = useState<LearnConfig | null>(null);
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [loading, setLoading] = useState(true);
@@ -131,6 +141,8 @@ function NotebookSection({ token }: { token: string | null }) {
 
   const [asking, setAsking] = useState(false);
   const [addingSource, setAddingSource] = useState(false);
+  /** Which file the ingest is on, so the panel can name it. */
+  const [addingLabel, setAddingLabel] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -265,7 +277,13 @@ function NotebookSection({ token }: { token: string | null }) {
           // an embedding pass on the backend, and firing five at once at a
           // single-instance service is how you turn "add sources" into a
           // timeout.
-          for (const file of Array.from(payload.files)) {
+          const files = Array.from(payload.files);
+          for (const [i, file] of files.entries()) {
+            setAddingLabel(
+              files.length > 1
+                ? `${file.name} (${i + 1} of ${files.length})`
+                : file.name,
+            );
             await uploadSource(openId, file, token);
           }
         } else if (payload.kind === "url") {
@@ -278,6 +296,7 @@ function NotebookSection({ token }: { token: string | null }) {
         fail(err);
       } finally {
         setAddingSource(false);
+        setAddingLabel(null);
       }
     },
     [openId, token, reloadWorkspace, fail],
@@ -423,6 +442,7 @@ function NotebookSection({ token }: { token: string | null }) {
           turns={turns}
           asking={asking}
           addingSource={addingSource}
+          addingLabel={addingLabel}
           generating={generating}
           modelName={config?.model_name ?? null}
           onBack={() => setOpenId(null)}
@@ -450,6 +470,7 @@ function NotebookSection({ token }: { token: string | null }) {
             onOpen={setOpenId}
             onCreate={create}
             onAction={notebookAction}
+            onBrowseCourses={onBrowseCourses}
           />
           {config && !config.persisted && (
             <p className="pointer-events-none absolute inset-x-0 bottom-3 mx-auto w-fit rounded-ctl

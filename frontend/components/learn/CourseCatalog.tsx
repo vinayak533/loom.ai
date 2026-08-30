@@ -125,7 +125,7 @@ export function CourseCatalog({
                   aria-selected={on}
                   onClick={() => setFilter(f.key)}
                   className={cn(
-                    "h-8 rounded-full px-3.5 text-[0.8125rem] font-medium transition-colors duration-200",
+                    "h-8 touch:h-11 rounded-full px-3.5 text-[0.8125rem] font-medium transition-colors duration-200",
                     on
                       ? "bg-accent text-accent-ink"
                       : "text-ink-muted hover:bg-elevated hover:text-ink",
@@ -143,8 +143,8 @@ export function CourseCatalog({
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search courses…"
               aria-label="Search courses"
-              className="h-8 w-[180px] rounded-ctl border border-line bg-elevated px-2.5 text-[0.8125rem]
-                         text-ink placeholder:text-ink-faint focus:border-accent-line focus:outline-none"
+              className="h-8 touch:h-11 w-[180px] rounded-ctl border border-line bg-elevated px-2.5 text-[0.8125rem]
+                         text-ink placeholder:text-ink-faint focus:border-line-focus focus:outline-none"
             />
           </div>
         </div>
@@ -312,7 +312,7 @@ const CourseTile = memo(function CourseTile({
             type="button"
             onClick={() => onContinue(course.id, course.progress.next_chapter_id)}
             className={cn(
-              "mt-4 flex h-9 w-full items-center justify-center gap-1.5 rounded-ctl text-[0.8125rem]",
+              "mt-4 flex h-9 touch:h-11 w-full items-center justify-center gap-1.5 rounded-ctl text-[0.8125rem]",
               "font-semibold transition-all duration-200 active:scale-[0.985]",
               started
                 ? "bg-gradient-to-br from-accent to-accent-alt text-accent-ink hover:brightness-110"
@@ -351,7 +351,7 @@ function ResumeBanner({
       <button
         type="button"
         onClick={onContinue}
-        className="flex h-9 shrink-0 items-center gap-1.5 rounded-ctl bg-gradient-to-br from-accent
+        className="flex h-9 touch:h-11 shrink-0 items-center gap-1.5 rounded-ctl bg-gradient-to-br from-accent
                    to-accent-alt px-4 text-[0.8125rem] font-semibold text-accent-ink
                    transition-all duration-200 hover:brightness-110 active:scale-[0.98]"
       >
