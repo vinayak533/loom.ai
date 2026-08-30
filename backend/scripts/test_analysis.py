@@ -212,6 +212,48 @@ check(
 check("empty stays empty", gitmsg._clean("") == "")
 
 
+section("8. LOOM.md reaches the prompt")
+
+import asyncio  # noqa: E402
+
+from app import analysis as _analysis  # noqa: E402
+from app import preamble  # noqa: E402
+
+_LOOM = {"text": ""}
+
+
+async def _fake_read(session_id, repo=None):
+    return _LOOM["text"]
+
+
+_analysis.read_loom_file = _fake_read
+
+check(
+    "no session id means no read at all",
+    asyncio.run(preamble.compose("BASE")) == "BASE",
+)
+
+_LOOM["text"] = ""
+check(
+    "an absent LOOM.md adds nothing",
+    asyncio.run(preamble.compose("BASE", session_id="s1")) == "BASE",
+)
+
+_LOOM["text"] = "## What this is\nA FastAPI service."
+composed = asyncio.run(preamble.compose("BASE", session_id="s1"))
+check("the base prompt survives", "BASE" in composed)
+check("LOOM.md content is injected", "A FastAPI service." in composed)
+check(
+    "it is labelled reference, not instruction",
+    "reference material" in composed,
+    "so a description of a Rails app is not read as an instruction to write Rails",
+)
+check(
+    "it comes after the base prompt",
+    composed.index("BASE") < composed.index("A FastAPI service."),
+)
+
+
 print()
 if _failures:
     print(f"{RED}{_failures} check(s) failed.{RESET}")

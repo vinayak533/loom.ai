@@ -636,7 +636,13 @@ async def git_commit(
 
     try:
         result = await git.commit(
-            session_id, message=message, paths=(payload or {}).get("paths") or None
+            session_id,
+            message=message,
+            paths=(payload or {}).get("paths") or None,
+            # The panel sends this once its checkboxes have staged a selection.
+            # Without it the `git add -A` inside commit() sweeps the unticked
+            # files back in and the checkboxes are decorative.
+            use_index=bool((payload or {}).get("use_index")),
         )
     except git.GitError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc

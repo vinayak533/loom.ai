@@ -17,9 +17,14 @@ import {
   fetchWorkspaceTree,
   listSessions,
   readWorkspaceFile,
+  branchOp,
   commitWorkspace,
+  fetchBranches,
   fetchGitState,
   initRepo,
+  stagePaths,
+  suggestCommitMessage,
+  type GitBranch,
   stopPreview as apiStopPreview,
   updateSession,
   workspaceFs,
@@ -800,12 +805,32 @@ export default function Page() {
   const [gitBusy, setGitBusy] = useState(false);
   const [gitError, setGitError] = useState<string | null>(null);
 
+  const [branches, setBranches] = useState<GitBranch[]>([]);
+
+  /**
+   * Refresh the branch list.
+   *
+   * Not part of the `git_state` broadcast: that event carries status and log,
+   * which change on every agent turn, and branches change on approximately
+   * none of them. Refetching them on every file write would be a round trip
+   * per turn to redraw a list that is almost always identical.
+   */
+  const refreshBranches = useCallback(() => {
+    if (!sessionId) return;
+    void fetchBranches(sessionId, token)
+      .then(setBranches)
+      .catch(() => setBranches([]));
+  }, [sessionId, token]);
+
   const commitChanges = useCallback(
-    (message: string) => {
+    (message: string, paths: string[] = []) => {
       if (!sessionId || gitBusy) return;
       setGitBusy(true);
       setGitError(null);
-      void commitWorkspace(sessionId, message, token)
+      // An empty selection means "everything", which is what the server does
+      // with no paths and no use_index. A non-empty one is staged first and
+      // then committed from the index, so nothing unticked can ride along.
+      void commitWorkspace(sessionId, message, token, paths, false)
         .then((result) => {
           if (!result.committed && result.reason) setGitError(result.reason);
           // The socket broadcast is the normal path; applying the response as
@@ -815,10 +840,73 @@ export default function Page() {
         .catch((err: unknown) =>
           setGitError(err instanceof Error ? err.message : "Commit failed."),
         )
+        .finally(() => {
+          setGitBusy(false);
+          refreshBranches();
+        });
+    },
+    [sessionId, token, gitBusy, applyGitState, refreshBranches],
+  );
+
+  const stageChanges = useCallback(
+    (paths: string[], mode: "stage" | "unstage" | "discard") => {
+      if (!sessionId || gitBusy) return;
+      setGitBusy(true);
+      setGitError(null);
+      void stagePaths(sessionId, paths, mode, token)
+        .then((result) => {
+          if (result.snapshot) applyGitState(result.snapshot);
+        })
+        .catch((err: unknown) =>
+          setGitError(err instanceof Error ? err.message : "That did not work."),
+        )
         .finally(() => setGitBusy(false));
     },
     [sessionId, token, gitBusy, applyGitState],
   );
+
+  const runBranchOp = useCallback(
+    (name: string, action: "create" | "checkout" | "merge") => {
+      if (!sessionId || gitBusy) return;
+      setGitBusy(true);
+      setGitError(null);
+      void branchOp(sessionId, name, action, token)
+        .then((result) => {
+          if (result.snapshot) applyGitState(result.snapshot);
+          // A conflicted merge resolves rather than throws — the merge really
+          // happened and the tree really has markers in it, so it is reported
+          // here rather than being mistaken for a clean result.
+          if (result.conflicted?.length) {
+            setGitError(
+              `Merged with ${result.conflicted.length} conflict(s): ` +
+                result.conflicted.slice(0, 3).join(", ") +
+                (result.conflicted.length > 3 ? "…" : "") +
+                ". Resolve them, then commit.",
+            );
+          }
+        })
+        .catch((err: unknown) =>
+          setGitError(err instanceof Error ? err.message : "That did not work."),
+        )
+        .finally(() => {
+          setGitBusy(false);
+          refreshBranches();
+        });
+    },
+    [sessionId, token, gitBusy, applyGitState, refreshBranches],
+  );
+
+  const suggestMessage = useCallback(async (): Promise<string> => {
+    if (!sessionId) return "";
+    try {
+      return await suggestCommitMessage(sessionId, token);
+    } catch (err: unknown) {
+      setGitError(
+        err instanceof Error ? err.message : "Could not write a message.",
+      );
+      return "";
+    }
+  }, [sessionId, token]);
 
   const startRepo = useCallback(() => {
     if (!sessionId || gitBusy) return;
@@ -831,8 +919,14 @@ export default function Page() {
       .catch((err: unknown) =>
         setGitError(err instanceof Error ? err.message : "Could not start a repository."),
       )
-      .finally(() => setGitBusy(false));
-  }, [sessionId, token, gitBusy, applyGitState]);
+      .finally(() => {
+        setGitBusy(false);
+        refreshBranches();
+      });
+  }, [sessionId, token, gitBusy, applyGitState, refreshBranches]);
+
+  // Once per session, not per turn: see `refreshBranches`.
+  useEffect(refreshBranches, [refreshBranches]);
 
   // --- naming --------------------------------------------------------------
 
@@ -1274,6 +1368,12 @@ export default function Page() {
     gitError,
     onCommit: commitChanges,
     onInitRepo: startRepo,
+    branches,
+    onStage: stageChanges,
+    onBranch: runBranchOp,
+    onSuggestMessage: suggestMessage,
+    sessionId,
+    token,
     exporting,
     onToggleTerminal: toggleTerminal,
     onClearTerminal: clearTerminal,

@@ -7,6 +7,7 @@ import type { AgentStatus, ChangedFile } from "@/lib/useAgentSocket";
 import { cn, shortPath } from "@/lib/cn";
 import { AnimationBoundary, SPRING, useMotionOK } from "./Anim";
 import { FileTree, type TreeActions } from "./FileTree";
+import { ProjectHealth } from "./ProjectHealth";
 import { ScanBars } from "./TraceSpine";
 
 /**
@@ -59,6 +60,8 @@ export const ProjectPulse = memo(function ProjectPulse({
   onSelectFile,
   onExport,
   treeActions,
+  sessionId,
+  token,
 }: {
   status: AgentStatus;
   connected: boolean;
@@ -78,6 +81,9 @@ export const ProjectPulse = memo(function ProjectPulse({
   onExport: () => void;
   /** Rename / delete / create, straight from the tree. Absent = read-only. */
   treeActions?: TreeActions;
+  /** Needed to measure the sandbox. Absent on a session that has none. */
+  sessionId?: string | null;
+  token?: string | null;
 }) {
   const changedPaths = Object.keys(changed).sort((a, b) => changed[b].at - changed[a].at);
   const working = status === "thinking" || status === "streaming" || status === "executing";
@@ -250,6 +256,16 @@ export const ProjectPulse = memo(function ProjectPulse({
       </Block>
 
       <div className="h-4 shrink-0" />
+
+      {/* ----------------------------------------------------------- codebase */}
+      <ProjectHealth
+        sessionId={sessionId ?? null}
+        token={token}
+        // Any monotonic signal works: the component only watches for a change,
+        // never reads the value. The count of touched files is the cheapest one
+        // this column already has.
+        changedCount={changedPaths.length}
+      />
     </div>
   );
 });

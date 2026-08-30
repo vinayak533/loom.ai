@@ -14,6 +14,7 @@ import { cn, shortPath } from "@/lib/cn";
 import { SPRING_SNAP, useMotionOK } from "./Anim";
 import { DiffViewer } from "./DiffViewer";
 import type { TreeActions } from "./FileTree";
+import type { GitBranch } from "@/lib/api";
 import { GitPanel } from "./GitPanel";
 import { PreviewPanel } from "./PreviewPanel";
 import { ProjectPulse } from "./ProjectPulse";
@@ -64,6 +65,12 @@ export const ContextColumn = memo(function ContextColumn({
   gitError,
   onCommit,
   onInitRepo,
+  branches,
+  onStage,
+  onBranch,
+  onSuggestMessage,
+  sessionId,
+  token,
   exporting,
   onToggleTerminal,
   onClearTerminal,
@@ -100,8 +107,15 @@ export const ContextColumn = memo(function ContextColumn({
   git: GitState;
   gitBusy: boolean;
   gitError: string | null;
-  onCommit: (message: string) => void;
+  onCommit: (message: string, paths: string[]) => void;
   onInitRepo: () => void;
+  branches?: GitBranch[];
+  onStage?: (paths: string[], mode: "stage" | "unstage" | "discard") => void;
+  onBranch?: (name: string, action: "create" | "checkout" | "merge") => void;
+  onSuggestMessage?: () => Promise<string>;
+  /** Both needed to measure the sandbox for the project health readout. */
+  sessionId?: string | null;
+  token?: string | null;
   /** True while the project zip is being packaged. */
   exporting: boolean;
   onToggleTerminal: () => void;
@@ -230,6 +244,10 @@ export const ContextColumn = memo(function ContextColumn({
               onCommit={onCommit}
               onInit={onInitRepo}
               onSelectFile={onSelectFile}
+              branches={branches}
+              onStage={onStage}
+              onBranch={onBranch}
+              onSuggestMessage={onSuggestMessage}
             />
           ) : showing === "code" && activeFileData ? (
             <DiffViewer
@@ -266,6 +284,8 @@ export const ContextColumn = memo(function ContextColumn({
               onSelectFile={onSelectFile}
               onExport={onExport}
               treeActions={treeActions}
+              sessionId={sessionId}
+              token={token}
             />
           )}
         </motion.div>

@@ -441,12 +441,152 @@ export async function commitWorkspace(
   message: string,
   token?: string | null,
   paths?: string[],
+  useIndex?: boolean,
 ): Promise<GitCommitResult> {
+  const body: Record<string, unknown> = { message };
+  if (paths?.length) body.paths = paths;
+  // Commit exactly what is staged. The panel sends this once the user has
+  // ticked a subset; without it the server stages everything first and the
+  // selection is ignored.
+  if (useIndex) body.use_index = true;
   return json(
     await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/git/commit`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders(token) },
-      body: JSON.stringify(paths?.length ? { message, paths } : { message }),
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+/** Stage, unstage, or discard paths. `discard` cannot be undone. */
+export async function stagePaths(
+  sessionId: string,
+  paths: string[],
+  mode: "stage" | "unstage" | "discard",
+  token?: string | null,
+): Promise<{ snapshot: GitSnapshot }> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/git/stage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
+      body: JSON.stringify({ paths, mode }),
+    }),
+  );
+}
+
+export type GitBranch = {
+  name: string;
+  sha: string;
+  subject: string;
+  current: boolean;
+};
+
+export async function fetchBranches(
+  sessionId: string,
+  token?: string | null,
+): Promise<GitBranch[]> {
+  const res = await json<{ branches: GitBranch[] }>(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/git/branches`, {
+      headers: authHeaders(token),
+      cache: "no-store",
+    }),
+  );
+  return res.branches;
+}
+
+/**
+ * Create, switch to, or merge a branch.
+ *
+ * A merge conflict is a normal success here, not a thrown error: `conflicted`
+ * names the files, and the merge really did happen. Callers must render that
+ * rather than treating a resolved promise as "clean".
+ */
+export async function branchOp(
+  sessionId: string,
+  name: string,
+  action: "create" | "checkout" | "merge",
+  token?: string | null,
+): Promise<{
+  branch: string;
+  merged?: boolean;
+  conflicted?: string[];
+  snapshot: GitSnapshot;
+}> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/git/branch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
+      body: JSON.stringify({ name, action }),
+    }),
+  );
+}
+
+/** A suggested commit message for what is staged. Costs one model call. */
+export async function suggestCommitMessage(
+  sessionId: string,
+  token?: string | null,
+): Promise<string> {
+  const res = await json<{ message: string }>(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/git/message`, {
+      method: "POST",
+      headers: authHeaders(token),
+    }),
+  );
+  return res.message;
+}
+
+// --- project analysis ------------------------------------------------------
+
+/**
+ * What a scan measured. `ok: false` is a normal answer, not an error — a
+ * session whose sandbox has not been woken has nothing to measure and says so.
+ */
+export type ProjectScan =
+  | { ok: false; reason: string }
+  | {
+      ok: true;
+      root: string;
+      file_count: number;
+      total_lines: number;
+      languages: { name: string; files: number; lines: number }[];
+      manifests: { file: string; ecosystem: string }[];
+      ecosystems: string[];
+      tests: { files: number; sample: string[] };
+      lint_configs: string[];
+      todos: { count: number; files: string[] };
+      top_level: string[];
+    };
+
+/** Measure the sandbox. Deterministic, no model call, free. */
+export async function fetchProjectScan(
+  sessionId: string,
+  token?: string | null,
+): Promise<ProjectScan> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/analysis`, {
+      headers: authHeaders(token),
+      cache: "no-store",
+    }),
+  );
+}
+
+/**
+ * Scan, then write the architecture narrative. Costs one model call.
+ *
+ * `writeFile` also stores it as LOOM.md at the sandbox root, which is read
+ * back into the system prompt on every later turn of the session — that is
+ * what makes an analysis outlive the conversation that asked for it.
+ */
+export async function runProjectAnalysis(
+  sessionId: string,
+  token?: string | null,
+  writeFile = false,
+): Promise<{ text: string; model_id: string | null; scan: ProjectScan }> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/analysis`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
+      body: JSON.stringify({ write_file: writeFile }),
     }),
   );
 }

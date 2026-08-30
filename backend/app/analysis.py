@@ -185,6 +185,18 @@ async def scan(session_id: str, repo: str | None = None) -> dict[str, Any]:
     renders, not an error it should have to catch.
     """
     root = posixpath.normpath(repo or WORKDIR)
+
+    # Never create one. `sandbox_manager.get` would, and the health panel calls
+    # this on mount — so merely opening the Code tab would cold-start an E2B
+    # sandbox, burn a slot and start the 15-minute idle clock for a session
+    # where nothing has been asked for yet. The same guard `read_loom_file`
+    # uses, for the same reason.
+    if sandbox_manager.sandbox_id_for(session_id) is None:
+        return {
+            "ok": False,
+            "reason": "Nothing has run in this session yet, so there is nothing to measure.",
+        }
+
     try:
         sandbox = await sandbox_manager.get(session_id)
     except Exception as exc:  # noqa: BLE001 - reported, never fatal
