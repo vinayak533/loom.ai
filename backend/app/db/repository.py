@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config import get_settings
+from app.llm_router import effective_default_model
 from app.db.supabase_client import enabled, get_client
 
 log = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ async def create_session(
         "id": session_id,
         "user_id": user_id,
         "title": title,
-        "model_id": model_id or get_settings().default_model_id,
+        "model_id": model_id or effective_default_model(),
         "status": "idle",
         "created_at": _now(),
         "updated_at": _now(),
@@ -139,13 +140,31 @@ async def create_session(
 
 
 async def get_session(session_id: str) -> dict | None:
+    """The session row, or None when there isn't one yet.
+
+    Deliberately *not* PostgREST's `.single()`. A session id reaches this
+    function before its row exists on every single connect — the browser mints
+    the id locally and the websocket handler is what inserts the row — and
+    `.single()` answers "no rows" by raising `PGRST116`. That turned the most
+    ordinary state in the system into an exception, which `_run` then logged as
+    a `WARNING` with a full traceback: three of them per new session, in a log
+    an operator is meant to be able to scan for real failures.
+
+    Worse than the noise, it erased a distinction that matters. `_run` returns
+    None for *any* exception, so "this session does not exist" and "Supabase is
+    unreachable" arrived here identically — and the caller treats None as "no
+    such session", so an outage read as a missing row. `.limit(1)` makes the
+    empty result an empty list, which is data rather than an error, and leaves
+    None meaning only what it should: the call itself failed.
+    """
     if not enabled():
         return None
     client = get_client()
     res = await _run(
-        lambda: client.table("sessions").select("*").eq("id", session_id).single().execute()
+        lambda: client.table("sessions").select("*").eq("id", session_id).limit(1).execute()
     )
-    return getattr(res, "data", None) if res else None
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else None
 
 
 async def list_sessions(
@@ -529,3 +548,456 @@ async def record_usage(
         "created_at": _now(),
     }
     await _run(lambda: client.table("token_usage").insert(row).execute())
+
+
+# --- conversation branches -------------------------------------------------
+#
+# See the long note on `public.message_branches` in schema.sql for why a branch
+# is a stored *suffix* rather than a node in a tree. The short version: the
+# conversation the agent reads is a flat list inside a LangGraph checkpoint,
+# nothing in it has a per-message identity, and a suffix snapshot needs neither.
+
+
+def user_turn_positions(messages: list[dict]) -> list[int]:
+    """Indices in ``messages`` of the turns a person actually typed.
+
+    Not every ``role == "user"`` entry is one. The block format requires a
+    turn's ``tool_result`` blocks to travel in a user message, so a
+    tool-using conversation is full of user entries nobody wrote. Counting
+    those would move every branch pointer the moment a turn called a tool.
+
+    A real turn is a user message carrying text, an image or a document. That
+    is the same test `itemsFromHistory` applies in the browser when it decides
+    whether to draw a bubble, which is what lets the two sides agree on "the
+    third message I sent" without exchanging ids.
+    """
+    positions: list[int] = []
+    for index, message in enumerate(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                positions.append(index)
+            continue
+        for block in content or []:
+            if isinstance(block, dict) and block.get("type") in (
+                "text",
+                "image",
+                "document",
+            ):
+                positions.append(index)
+                break
+    return positions
+
+
+async def list_branches(session_id: str) -> list[dict]:
+    """Every stored branch for a session, oldest turn and version first."""
+    if not enabled():
+        return []
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("message_branches")
+            .select("*")
+            .eq("session_id", session_id)
+            .order("turn_index")
+            .order("version")
+            .execute()
+        )
+
+    res = await _run(_query)
+    return getattr(res, "data", None) or []
+
+
+async def branch_versions(session_id: str, turn_index: int) -> list[dict]:
+    """The versions recorded at one turn, without their message payloads.
+
+    The switcher needs a count and a label per version; the snapshots are tens
+    of kilobytes each and are only read when someone actually switches.
+    """
+    if not enabled():
+        return []
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("message_branches")
+            .select("id,version,label,created_at")
+            .eq("session_id", session_id)
+            .eq("turn_index", turn_index)
+            .order("version")
+            .execute()
+        )
+
+    res = await _run(_query)
+    return getattr(res, "data", None) or []
+
+
+async def save_branch(
+    session_id: str,
+    turn_index: int,
+    version: int,
+    messages: list[dict],
+    label: str = "",
+    user_id: str | None = None,
+) -> bool:
+    """Record one version of the conversation from ``turn_index`` onwards.
+
+    Upserted on the unique (session, turn, version) index so re-recording a
+    version — which happens every time a branch is re-run — replaces it rather
+    than accumulating duplicates that the switcher would then count.
+    """
+    if not enabled():
+        return False
+    client = get_client()
+    row = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "turn_index": turn_index,
+        "version": version,
+        "label": (label or "")[:120] or None,
+        "messages": messages,
+        "created_at": _now(),
+    }
+    res = await _run(
+        lambda: client.table("message_branches")
+        .upsert(row, on_conflict="session_id,turn_index,version")
+        .execute()
+    )
+    return res is not None
+
+
+async def get_branch(
+    session_id: str, turn_index: int, version: int
+) -> dict | None:
+    """One branch snapshot, payload included."""
+    if not enabled():
+        return None
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("message_branches")
+            .select("*")
+            .eq("session_id", session_id)
+            .eq("turn_index", turn_index)
+            .eq("version", version)
+            .limit(1)
+            .execute()
+        )
+
+    res = await _run(_query)
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else None
+
+
+async def set_active_branch(
+    session_id: str, turn_index: int, version: int
+) -> None:
+    """Mark one version as the branch currently spliced into the checkpoint.
+
+    Two writes rather than one, and in this order: clear the turn, then set the
+    winner. A single upsert cannot express "exactly one of these" and the brief
+    window where none is active is harmless — every reader falls back to the
+    highest version when nothing is marked.
+    """
+    if not enabled():
+        return
+    client = get_client()
+    await _run(
+        lambda: client.table("message_branches")
+        .update({"is_active": False})
+        .eq("session_id", session_id)
+        .eq("turn_index", turn_index)
+        .execute()
+    )
+    await _run(
+        lambda: client.table("message_branches")
+        .update({"is_active": True})
+        .eq("session_id", session_id)
+        .eq("turn_index", turn_index)
+        .eq("version", version)
+        .execute()
+    )
+
+
+async def drop_branches_from(session_id: str, turn_index: int) -> None:
+    """Forget every branch at or after ``turn_index``.
+
+    Called when a *new* message is sent normally at the end of a thread that
+    had been branched earlier. Those snapshots describe a conversation that no
+    longer exists downstream of this point, and keeping them would give the
+    switcher versions that cannot be restored without contradicting the turns
+    that came after.
+    """
+    if not enabled():
+        return
+    client = get_client()
+    await _run(
+        lambda: client.table("message_branches")
+        .delete()
+        .eq("session_id", session_id)
+        .gte("turn_index", turn_index)
+        .execute()
+    )
+
+
+# --- response feedback -----------------------------------------------------
+
+
+async def set_feedback(
+    session_id: str,
+    turn_index: int,
+    rating: str | None,
+    user_id: str = "anonymous",
+    reason: str | None = None,
+    model_id: str | None = None,
+    section: str | None = None,
+) -> bool:
+    """Record — or, with ``rating=None``, withdraw — a verdict on one reply.
+
+    Upserted per (session, user, turn): clicking thumbs-down after thumbs-up
+    is a change of mind, not a second vote. Clicking the same thumb again
+    clears it, which is what ``rating=None`` is for.
+    """
+    if not enabled():
+        return False
+    client = get_client()
+
+    if rating is None:
+        res = await _run(
+            lambda: client.table("message_feedback")
+            .delete()
+            .eq("session_id", session_id)
+            .eq("user_id", user_id)
+            .eq("turn_index", turn_index)
+            .execute()
+        )
+        return res is not None
+
+    row = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "turn_index": turn_index,
+        "rating": rating,
+        "reason": (reason or None),
+        "model_id": model_id,
+        "section": section,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    res = await _run(
+        lambda: client.table("message_feedback")
+        .upsert(row, on_conflict="session_id,user_id,turn_index")
+        .execute()
+    )
+    return res is not None
+
+
+async def list_feedback(session_id: str, user_id: str = "anonymous") -> list[dict]:
+    """This person's verdicts on this session, for rehydrating the controls."""
+    if not enabled():
+        return []
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("message_feedback")
+            .select("turn_index,rating,reason")
+            .eq("session_id", session_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+
+    res = await _run(_query)
+    return getattr(res, "data", None) or []
+
+
+# --- per-account preferences -----------------------------------------------
+
+
+async def get_preferences(user_id: str) -> dict:
+    """This account's saved preferences, or an empty dict when it has none.
+
+    Empty is meaningful and is not the same as "the defaults": a user who has
+    never expressed a preference should keep following the build's default
+    model when that default changes, and one who has chosen should not.
+    """
+    if not enabled() or not user_id:
+        return {}
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("user_preferences")
+            .select("*")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+
+    res = await _run(_query)
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else {}
+
+
+async def set_preferences(
+    user_id: str,
+    default_model_id: str | None = None,
+    theme: str | None = None,
+) -> dict:
+    """Write the preferences this call names, leaving the rest alone.
+
+    ``default_model_id=""`` is how a preference is *cleared* — distinct from
+    None, which means "this call is not about the default model".
+    """
+    if not enabled() or not user_id:
+        return {}
+    client = get_client()
+    row: dict[str, Any] = {"user_id": user_id, "updated_at": _now()}
+    if default_model_id is not None:
+        row["default_model_id"] = default_model_id or None
+    if theme is not None:
+        row["theme"] = theme
+    res = await _run(
+        lambda: client.table("user_preferences")
+        .upsert(row, on_conflict="user_id")
+        .execute()
+    )
+    if res is None:
+        return {}
+    return await get_preferences(user_id)
+
+
+# --- history search --------------------------------------------------------
+
+
+async def search_sessions(
+    query: str,
+    user_id: str | None = None,
+    section: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 30,
+) -> list[dict]:
+    """Sessions whose title *or transcript* matches ``query``.
+
+    Two queries rather than one, because they answer different questions and
+    PostgREST cannot join them in a single request: `sessions.title` is an
+    `ilike`, and message bodies live in another table entirely. Titles are
+    listed first because a title match is a stronger signal than one hit
+    somewhere in a long transcript, and each row carries the snippet that
+    matched so the result explains itself.
+
+    No model is involved. This is two indexed `ilike` scans and a merge — a
+    search box that waited on an LLM would be both slower and worse.
+    """
+    term = (query or "").strip()
+    if not enabled() or not term:
+        return []
+    # Escape *then* re-check for emptiness. A query of nothing but wildcards
+    # ("%", "_") passes the check above, strips to "" here, and would become
+    # the pattern "%%" — which matches every session in the account. Searching
+    # for a wildcard should find the sessions that literally contain one, and
+    # since the escape drops them, the honest answer is nothing.
+    needle = _escape_like(term)
+    if not needle:
+        return []
+    client = get_client()
+    pattern = f"%{needle}%"
+
+    def _sessions():
+        q = client.table("sessions").select("*").ilike("title", pattern)
+        q = q.eq("user_id", user_id) if user_id else q.is_("user_id", "null")
+        q = q.eq("is_archived", False)
+        q = q.eq("agent_id", agent_id) if agent_id else q.is_("agent_id", "null")
+        if section == "chat":
+            q = q.or_("section.eq.chat,section.is.null")
+        elif section:
+            q = q.eq("section", section)
+        return q.order("updated_at", desc=True).limit(limit).execute()
+
+    def _messages():
+        return (
+            client.table("messages")
+            .select("session_id,content,created_at")
+            .eq("role", "user")
+            .ilike("content", pattern)
+            .order("created_at", desc=True)
+            .limit(limit * 6)
+            .execute()
+        )
+
+    title_res, body_res = await asyncio.gather(
+        _run(_sessions), _run(_messages)
+    )
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in getattr(title_res, "data", None) or []:
+        seen.add(row["id"])
+        out.append({**row, "match": "title", "snippet": None})
+
+    body_rows = getattr(body_res, "data", None) or []
+    # Which sessions the matching messages belong to, minus the ones already
+    # listed by title, and only the ones this caller is allowed to see. The
+    # ownership filter is a second query rather than trust in the first: the
+    # message search cannot filter by user, because `messages` has no
+    # `user_id`, so the ids it returns have to be checked against `sessions`.
+    candidates = [r["session_id"] for r in body_rows if r["session_id"] not in seen]
+    if candidates:
+        # De-duplicated, order preserved: the first (most recent) hit per
+        # session is the snippet worth showing.
+        ordered: list[str] = []
+        snippets: dict[str, str] = {}
+        for row in body_rows:
+            sid = row["session_id"]
+            if sid in seen or sid in snippets:
+                continue
+            ordered.append(sid)
+            snippets[sid] = _snippet(row.get("content") or "", needle)
+
+        def _owned():
+            q = client.table("sessions").select("*").in_("id", ordered[: limit * 3])
+            q = q.eq("user_id", user_id) if user_id else q.is_("user_id", "null")
+            q = q.eq("is_archived", False)
+            q = q.eq("agent_id", agent_id) if agent_id else q.is_("agent_id", "null")
+            if section == "chat":
+                q = q.or_("section.eq.chat,section.is.null")
+            elif section:
+                q = q.eq("section", section)
+            return q.execute()
+
+        owned = await _run(_owned)
+        by_id = {r["id"]: r for r in (getattr(owned, "data", None) or [])}
+        for sid in ordered:
+            row = by_id.get(sid)
+            if row is None:
+                continue
+            out.append({**row, "match": "message", "snippet": snippets.get(sid)})
+
+    return out[:limit]
+
+
+def _escape_like(term: str) -> str:
+    """Neutralise the wildcards a user can type into an `ilike` pattern.
+
+    Without this, searching for `100%` matches every session in the account and
+    `_` matches any character — surprising, and on a large history slow.
+    PostgREST also treats `,` and `.` as structure inside some filter strings,
+    so both are dropped from the pattern rather than escaped.
+    """
+    out = term.replace("%", "").replace("_", "").replace(",", " ")
+    return out.strip()
+
+
+def _snippet(content: str, term: str, width: int = 90) -> str:
+    """The matched phrase with a little context either side, on one line."""
+    flat = " ".join(content.split())
+    at = flat.lower().find(term.lower())
+    if at < 0:
+        return flat[:width]
+    start = max(0, at - width // 3)
+    end = min(len(flat), at + len(term) + width // 2)
+    return ("… " if start else "") + flat[start:end] + (" …" if end < len(flat) else "")

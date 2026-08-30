@@ -18,16 +18,23 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app import cancel
 from app import events as ev
 from app.agents import approvals, registry, runner
 from app.agents.tool_registry import tool_public_meta
 from app.agent.llm import generate_title
 from app.api.auth import resolve_user
-from app.api.ownership import owns_session
+from app.api.ownership import owns_row
 from app.api.ratelimit import RateLimiter
+from app.api import rerun
 from app.api.ws import _writer  # the same drain-and-coalesce loop Chat/Code use
 from app.config import get_settings
-from app.credits import InsufficientCredits, ensure_can_start, get_balance
+from app.credits import (
+    InsufficientCredits,
+    ensure_can_start,
+    get_balance,
+    prime_balance,
+)
 from app.db import repository
 from app.emitter import Emitter, registry as emitter_registry
 from app.llm_router import (
@@ -56,15 +63,22 @@ async def specialist_socket(
 ):
     settings = get_settings()
 
+    # Overlapped for the same reason as the Chat/Code socket: two Supabase
+    # round trips that do not depend on each other were being paid one after
+    # the other, ~305 ms before the socket was even accepted.
+    user_task = asyncio.create_task(resolve_user(token))
+    row_task = asyncio.create_task(repository.get_session(session_id))
     try:
-        user_id = await resolve_user(token)
+        user_id = await user_task
     except Exception:  # noqa: BLE001 - HTTPException from resolve_user
+        row_task.cancel()
         await websocket.close(code=4401, reason="Unauthorized")
         return
 
     # Same rule as the Chat/Code socket: knowing who you are is not the same as
     # being entitled to this session's transcript and its continuation.
-    if not await owns_session(user_id, session_id):
+    row = await row_task
+    if not owns_row(user_id, row):
         await websocket.close(code=4403, reason="Forbidden")
         return
 
@@ -77,11 +91,14 @@ async def specialist_socket(
 
     emitter.emit(ev.connected(session_id))
 
+    asyncio.create_task(prime_balance(user_id))
+
     # --- resolve which specialist owns this session -----------------------
     # The session row is authoritative. The query parameter only seeds a *new*
     # session: letting it override an existing one would continue a transcript
     # written under one persona using another's tools.
-    row = await repository.get_session(session_id)
+    # `row` is the one already read for the ownership check — re-reading it
+    # here was a second ~153 ms round trip on every connect.
     stored_agent = (row or {}).get("agent_id")
     agent_id = stored_agent or (agent or "").strip()
 
@@ -134,6 +151,7 @@ async def specialist_socket(
         )
     )
     _emit_model(emitter, current_model)
+    asyncio.create_task(rerun.emit_branches(session_id, emitter))
 
     try:
         while True:
@@ -145,8 +163,11 @@ async def specialist_socket(
                 continue
 
             if kind == "cancel":
+                # Cooperative — see app/cancel.py. The specialist loop keeps
+                # its partial answer, closes any tool call it had not started,
+                # and bills the tokens actually produced.
                 if run_task and not run_task.done():
-                    run_task.cancel()
+                    cancel.request_stop(session_id)
                 continue
 
             if kind == "approval_resolve":
@@ -173,6 +194,43 @@ async def specialist_socket(
                     _emit_model(emitter, mid)
                 else:
                     emitter.emit(ev.error(f"Unknown model `{mid}`."))
+                continue
+
+            if kind in ("edit_message", "regenerate"):
+                if run_task and not run_task.done():
+                    emitter.emit(
+                        ev.error("This agent is still working — stop it first.")
+                    )
+                    continue
+                prepared = await rerun.prepare_rerun(
+                    runner, session_id, frame, kind, emitter
+                )
+                if prepared is None:
+                    continue
+                new_text, turn_index, version, file_ids = prepared
+                emitter.emit(ev.history_replaced(kind, turn_index, new_text))
+                run_task = asyncio.create_task(
+                    _run(
+                        session_id,
+                        agent_id,
+                        new_text,
+                        file_ids,
+                        emitter,
+                        current_model,
+                        user_id,
+                        title_it=False,
+                        branch=(turn_index, version),
+                    )
+                )
+                continue
+
+            if kind == "switch_branch":
+                if run_task and not run_task.done():
+                    emitter.emit(
+                        ev.error("This agent is still working — stop it first.")
+                    )
+                    continue
+                await rerun.switch_branch(runner, session_id, frame, emitter)
                 continue
 
             if kind != "user_message":
@@ -296,10 +354,22 @@ async def _run(
     emitter: Emitter,
     model_id: str,
     user_id: str | None,
+    title_it: bool = True,
+    branch: tuple[int, int] | None = None,
 ) -> None:
+    """One specialist turn.
+
+    ``title_it`` and ``branch`` carry the same meanings as on the Chat/Code
+    side: a re-run must not rename the session, and an edit or regenerate has a
+    branch version waiting for the reply this run is about to produce.
+    """
+    # A stop asked for while nothing was running must not land on this turn.
+    cancel.clear(session_id)
+
     repository.fire(repository.add_message(session_id, "user", text))
     repository.fire(repository.touch_session(session_id, status="running"))
-    asyncio.create_task(_maybe_title(session_id, agent_id, text))
+    if title_it:
+        asyncio.create_task(_maybe_title(session_id, agent_id, text))
 
     try:
         final = await runner.run_turn(
@@ -323,7 +393,19 @@ async def _run(
         emitter.emit(ev.error(f"{type(exc).__name__}: {exc}"))
         emitter.emit(ev.agent_done(0, "error"))
     finally:
-        await repository.touch_session(session_id, status="idle")
+        # Fired, not awaited. The client has already been sent `agent_done` by
+        # this point, so it believes the turn is over and its composer is live
+        # again — but the socket's "is a run in flight" guard is
+        # `run_task.done()`, and awaiting a Supabase round trip here kept that
+        # task alive for ~150 ms *after* the user was told to go ahead. Send a
+        # second message inside that window and it came back "The agent is
+        # still working - cancel it first", for a turn that had finished.
+        # Nothing reads this write, so it does not belong on that path.
+        repository.fire(repository.touch_session(session_id, status="idle"))
+        cancel.clear(session_id)
+        asyncio.create_task(
+            rerun.settle_branches(runner, session_id, emitter, branch)
+        )
 
 
 async def _maybe_title(session_id: str, agent_id: str, text: str) -> None:

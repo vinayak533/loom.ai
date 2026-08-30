@@ -15,6 +15,7 @@ import type {
   FileNode,
   GitChange,
   GitCommit,
+  BranchGroup,
   SearchResult,
   ServerEvent,
 } from "./events";
@@ -147,8 +148,12 @@ export type TerminalLine = {
 export type ModelToast = {
   id: string;
   text: string;
-  /** `route` is the auto-router's voice; `manual` is the user's own pick. */
-  tone: "route" | "manual" | "error";
+  /**
+   * `route` is the auto-router's voice; `manual` is the user's own pick;
+   * `fallback` is neither — the chosen model failed and the router finished
+   * the request somewhere else.
+   */
+  tone: "route" | "manual" | "fallback" | "error";
 };
 
 export type ChangedFile = {
@@ -268,6 +273,18 @@ export type AgentState = {
   credits: CreditsState | null;
   /** True while a run is suspended on an approval, so the composer can say so. */
   awaitingApproval: boolean;
+  /**
+   * Which user turns have been edited, and what versions each has.
+   *
+   * Keyed by *user-turn ordinal* rather than by item id, which is the one
+   * decision worth understanding here: the transcript is replayed from the
+   * server's checkpoint and carries no stable per-message identity, so the
+   * only coordinate both sides can agree on across a reload is "the nth
+   * message you sent". `items.filter(i => i.kind === "user")` produces exactly
+   * that ordering, and the backend's `user_turn_positions` produces the same
+   * one from the other end.
+   */
+  branches: BranchGroup[];
 };
 
 const initialState: AgentState = {
@@ -286,8 +303,8 @@ const initialState: AgentState = {
   usage: { input: 0, output: 0, cost: 0 },
   iterations: 0,
   lastError: null,
-  modelId: "grok-4-5",
-  modelName: "Grok 4.5",
+  modelId: "qwen3_7_plus",
+  modelName: "Qwen 3.7 Plus",
   modelSupportsTools: true,
   modelAvailable: true,
   modelAnnounced: false,
@@ -298,6 +315,7 @@ const initialState: AgentState = {
   agent: null,
   credits: null,
   awaitingApproval: false,
+  branches: [],
 };
 
 type Action =
@@ -314,12 +332,22 @@ type Action =
   | { t: "dismissPreviewError" }
   /** A file the user saved from the inline editor, folded into agent state. */
   | { t: "localEdit"; file: ChangedFile }
-  /** The checkpointed transcript, replayed after a reload. */
+  /**
+   * The checkpointed transcript.
+   *
+   * `replace` separates the two callers, which want opposite things. The
+   * connect-time replay must *not* overwrite a conversation that is already on
+   * screen — it can land after the user has started typing, and clobbering
+   * live state with a stale read is the bug the guard in the reducer exists
+   * for. A deliberate re-read after a branch switch is the whole point of the
+   * call and has to win.
+   */
   | {
       t: "hydrate";
       items: ChatItem[];
       usage: { input: number; output: number; cost: number };
       iterations: number;
+      replace?: boolean;
     }
   /** A tree fetched over HTTP after the user changed the filesystem. */
   | { t: "applyTree"; path: string; nodes: FileNode[] }
@@ -355,6 +383,25 @@ function patchLast(items: ChatItem[], fn: (i: ChatItem) => ChatItem): ChatItem[]
   const copy = items.slice();
   copy[copy.length - 1] = fn(copy[copy.length - 1]);
   return copy;
+}
+
+/**
+ * Everything before the `turnIndex`-th user message.
+ *
+ * The ordinal is counted over user rows only, which is the same thing the
+ * backend counts (`repository.user_turn_positions`) — a `tool_result` carrier
+ * is a "user" message in the wire format but not one anybody typed. Counting
+ * differently on the two sides is how a switcher ends up pointing at the wrong
+ * turn the moment a conversation uses a tool.
+ */
+function truncateToUserTurn(items: ChatItem[], turnIndex: number): ChatItem[] {
+  let seen = 0;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].kind !== "user") continue;
+    if (seen === turnIndex) return items.slice(0, i);
+    seen++;
+  }
+  return items;
 }
 
 function closeStreaming(items: ChatItem[]): ChatItem[] {
@@ -444,7 +491,9 @@ function reducer(state: AgentState, action: Action): AgentState {
     // live thread is the newer truth. Dropping the hydration is always safe;
     // overwriting a live turn would not be.
     case "hydrate":
-      if (state.items.length || !action.items.length) return state;
+      if (!action.replace && (state.items.length || !action.items.length)) {
+        return state;
+      }
       return {
         ...state,
         items: action.items,
@@ -790,6 +839,12 @@ function applyEvent(state: AgentState, e: ServerEvent): AgentState {
 
     case "model_changed": {
       const auto = e.routing_mode === "auto";
+      // An involuntary switch. This is the one case that must announce itself
+      // even when it is the session's *first* model event and even when Auto
+      // is what picked the failing model: the user's request completed on a
+      // model nobody chose, and silence there is worse than the error it
+      // replaced.
+      const fellBack = Boolean(e.fallback_from);
       // Entering Auto is not itself a routing decision — the first real one
       // comes when the next turn is classified. Announcing the sentinel would
       // read as "Routed to Auto", which names no model.
@@ -801,13 +856,34 @@ function applyEvent(state: AgentState, e: ServerEvent): AgentState {
       // it lands has moved. Auto reroutes between turns as a matter of course,
       // so its wording is informational ("here's why"); a manual switch is the
       // user's own act, reported back to them.
-      const text = auto
-        ? e.reason
-          ? `Routed to ${e.name} for ${e.reason}.`
-          : `Routed to ${e.name}.`
-        : e.note
-          ? `Switched to ${e.name} — ${e.note}`
-          : `Switched to ${e.name}.`;
+      //
+      // "GPT-OSS 120B is unavailable — switched to Nemotron 3 Ultra."
+      // `note` already carries "<failed model> <what went wrong>" from the
+      // backend, so the wording stays in one place rather than being
+      // reconstructed from ids the client would have to map back to names.
+      const text = fellBack
+        ? `${e.note || "The selected model failed"} — switched to ${e.name}.`
+        : auto
+          ? e.reason
+            ? `Routed to ${e.name} for ${e.reason}.`
+            : `Routed to ${e.name}.`
+          : e.note
+            ? `Switched to ${e.name} — ${e.note}`
+            : `Switched to ${e.name}.`;
+
+      // A fallback announces itself and changes nothing else. It rescued one
+      // call; it did not re-pick the model. Overwriting the selection here
+      // would strand the user on the stand-in — the selector would show it,
+      // and the next turn would use it — after a rate limit that has very
+      // likely already cleared. The backend keeps the same split (see
+      // `answered_by` in agent/graph.py): the stand-in is billed for the call
+      // it answered, and the session stays on what the user chose.
+      if (fellBack) {
+        return {
+          ...state,
+          toast: { id: uid("toast"), text, tone: "fallback" },
+        };
+      }
 
       return {
         ...state,
@@ -941,6 +1017,36 @@ function applyEvent(state: AgentState, e: ServerEvent): AgentState {
         ],
       };
 
+    case "branches":
+      return { ...state, branches: e.branches };
+
+    case "history_replaced": {
+      // A branch switch is refetched (from the socket handler — a reducer
+      // cannot go and get anything) because it replaces a suffix rather than
+      // truncating one. Nothing else to do here.
+      if (e.reason === "branch" || e.turn_index < 0) {
+        return { ...state, lastError: null };
+      }
+      // An edit or a regenerate cuts the conversation at a known turn and
+      // immediately re-runs it. Cutting locally rather than refetching is not
+      // an optimisation — it is the only correct option. The re-run has
+      // already begun on the server, so a fetch issued now reads a checkpoint
+      // that is being rewritten underneath it and comes back either empty or
+      // still holding the turns that were just removed. Both were observed;
+      // the second is worse, because the new reply then streams on underneath
+      // the old one and the thread shows the question twice.
+      return {
+        ...state,
+        status: "thinking",
+        lastError: null,
+        credits: state.credits ? { ...state.credits, spentThisTurn: 0 } : null,
+        items: [
+          ...truncateToUserTurn(state.items, e.turn_index),
+          { kind: "user", id: uid("u"), text: e.content, files: [] },
+        ],
+      };
+    }
+
     case "error":
       return {
         ...state,
@@ -976,6 +1082,16 @@ export function useAgentSocket(
   const socketRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
   const closedByUs = useRef(false);
+  /**
+   * How to refetch this session's transcript, set by the connect effect below.
+   *
+   * An edit or a branch switch rewrites the conversation on the server, and
+   * the change is not expressible as a patch — it can drop any number of turns
+   * off the end. So the server says "it changed" and the client goes and reads
+   * the new one, which is the same path a page reload already takes and
+   * therefore the one already known to produce a correct transcript.
+   */
+  const reloadHistory = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (!sessionId) return;
@@ -1010,6 +1126,12 @@ export function useAgentSocket(
         try {
           const e = JSON.parse(msg.data) as ServerEvent;
           if (e.type === "pong") return;
+          // Only a branch switch refetches; an edit or regenerate is applied
+          // locally by the reducer, because a fetch there races the re-run
+          // that has already started. See the reducer case.
+          if (e.type === "history_replaced" && e.reason === "branch") {
+            reloadHistory.current();
+          }
           dispatch({ t: "event", e });
         } catch {
           /* a malformed frame is not worth tearing the session down */
@@ -1043,18 +1165,25 @@ export function useAgentSocket(
     // checkpointer. The `sandbox_id` branch below then does nothing for
     // agents, which is correct — they have no sandbox tree to fetch.
     let hydrated = false;
-    const loadHistory = agentId
-      ? fetchAgentHistory(sessionId, token)
-      : fetchHistory(sessionId, token);
-    loadHistory
-      .then((history) => {
-        if (closedByUs.current || hydrated) return;
-        hydrated = true;
+    /**
+     * `first` distinguishes the connect-time replay from a re-read after an
+     * edit or a branch switch. The first one is guarded against arriving twice
+     * (a StrictMode remount races itself); the later ones must *not* be, since
+     * re-reading is the entire point of them.
+     */
+    const readHistory = (first: boolean) => {
+      const loading = agentId
+        ? fetchAgentHistory(sessionId, token)
+        : fetchHistory(sessionId, token);
+      return loading.then((history) => {
+        if (closedByUs.current || (first && hydrated)) return;
+        if (first) hydrated = true;
         dispatch({
           t: "hydrate",
           items: itemsFromHistory(history),
           usage: usageFromHistory(history),
           iterations: history.checkpoint?.iterations ?? 0,
+          replace: !first,
         });
         // The tree only when a sandbox is actually up. Reading it would
         // otherwise *create* one on every page load, for sessions nobody has
@@ -1067,10 +1196,16 @@ export function useAgentSocket(
             }
           })
           .catch(() => undefined);
-      })
-      .catch(() => {
-        // A session with no checkpoint yet is the common case, not a failure.
       });
+    };
+
+    reloadHistory.current = () => {
+      void readHistory(false).catch(() => undefined);
+    };
+
+    void readHistory(true).catch(() => {
+      // A session with no checkpoint yet is the common case, not a failure.
+    });
 
     return () => {
       closedByUs.current = true;
@@ -1092,6 +1227,61 @@ export function useAgentSocket(
   const cancel = useCallback(() => {
     const ws = socketRef.current;
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "cancel" }));
+  }, []);
+
+  /**
+   * Replace an earlier message and re-run from there.
+   *
+   * `turnIndex` is the ordinal among user turns — the same coordinate the
+   * server uses. The transcript is not touched here: the server answers with
+   * `history_replaced`, and the refetch that follows is what redraws it. Doing
+   * it optimistically would mean guessing how many turns the rewind removes,
+   * and being wrong about that leaves the screen disagreeing with the model.
+   */
+  const editMessage = useCallback(
+    (turnIndex: number, content: string, fileIds: string[] = []) => {
+      const ws = socketRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      ws.send(
+        JSON.stringify({
+          type: "edit_message",
+          turn_index: turnIndex,
+          content,
+          file_ids: fileIds,
+        }),
+      );
+      return true;
+    },
+    [],
+  );
+
+  /**
+   * Re-run the last turn with a fresh model call.
+   *
+   * Nothing about the current model selection travels in this frame, and that
+   * is deliberate rather than an omission: the server runs it on whatever the
+   * session is set to *now*, so switching model and then regenerating does what
+   * it looks like it does.
+   */
+  const regenerate = useCallback(() => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type: "regenerate" }));
+    return true;
+  }, []);
+
+  /** Move to another version of an edited turn. */
+  const switchBranch = useCallback((turnIndex: number, version: number) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(
+      JSON.stringify({
+        type: "switch_branch",
+        turn_index: turnIndex,
+        version,
+      }),
+    );
+    return true;
   }, []);
 
   const setModel = useCallback((modelId: string) => {
@@ -1197,6 +1387,9 @@ export function useAgentSocket(
     busy,
     send,
     cancel,
+    editMessage,
+    regenerate,
+    switchBranch,
     setModel,
     resolveApproval,
     openFile,

@@ -51,8 +51,29 @@ SERVER -> CLIENT
                                    "available": true, "note": "...",
                                    "routing_mode": "manual"|"auto",
                                    "routing_hint": "code_editing"|...|"",
-                                   "reason": "code editing"}
+                                   "reason": "code editing",
+                                   "fallback_from": ""|"<model that failed>"}
+    # `fallback_from` is non-empty only when the switch was involuntary: the
+    # selected model errored (429 / 5xx / unavailable) and the router retried
+    # on this one. `reason` then reads "hit a rate limit" rather than naming a
+    # routing hint.
 {"type": "error",                 "message": "..."}
+{"type": "branches",              "branches": [
+                                    {"turn_index": 2, "active": 2,
+                                     "versions": [{"version": 1, "label": "...",
+                                                   "created_at": "..."}, ...]}]}
+    # One entry per *branched* user turn — a turn that has been edited at least
+    # once. Sent on connect, and again after any edit, regenerate or switch.
+    # A session nobody has edited sends `{"branches": []}` and draws no
+    # switchers. `turn_index` counts user turns, not entries in the message
+    # array; see `repository.user_turn_positions` for why.
+{"type": "history_replaced",      "reason": "edit"|"regenerate"|"branch",
+                                  "turn_index": 2, "content": "..."}
+    # The conversation on the server is no longer the one on screen. For an
+    # edit or a regenerate the frame names the turn that was cut and the text
+    # replacing it, so the client can truncate its own transcript at the same
+    # place — refetching there races the re-run that has already started. For
+    # a branch switch `turn_index` is -1 and the client refetches instead.
 
 --------------------------------------------------------------------------
 SERVER -> CLIENT — the Agentic Loop section only
@@ -93,10 +114,24 @@ them, which is why the protocol version below is unchanged.
 CLIENT -> SERVER
 --------------------------------------------------------------------------
 {"type": "user_message", "content": "...", "file_ids": ["..."]}
-{"type": "set_model",   "model_id": "auto | grok-4-5 | qwen3_7_plus | ..."}
+{"type": "set_model",   "model_id": "auto | qwen3_7_plus | mimo_v2_5 | ..."}
     # "auto" is a routing mode, not a model: the backend then classifies each
     # turn and picks for itself. Any other id pins the session to that model.
 {"type": "cancel"}
+    # A *request* to stop, not an interrupt. The run finishes the frame it is
+    # on, keeps the partial answer, closes any tool call that had not started,
+    # bills the tokens actually generated, and ends with
+    # `agent_done.reason == "cancelled"`. See `app/cancel.py`.
+{"type": "edit_message", "turn_index": 2, "content": "...", "file_ids": [...]}
+    # Replace user turn `turn_index` and re-run the conversation from there.
+    # The turns that followed are preserved as a branch, never deleted.
+{"type": "regenerate"}
+    # Re-run the most recent user turn with a fresh model call. Uses whichever
+    # model is selected *now*, which is not necessarily the one that answered
+    # the first time. The previous answer is kept as a branch.
+{"type": "switch_branch", "turn_index": 2, "version": 1}
+    # Make a stored branch the live conversation again. Affects what the model
+    # sees on the next turn, not just what is drawn.
 {"type": "ping"}
 
 CLIENT -> SERVER — the Agentic Loop section only
@@ -330,13 +365,21 @@ def model_changed(
     routing_mode: str = "manual",
     routing_hint: str | None = None,
     reason: str | None = None,
+    fallback_from: str | None = None,
 ) -> dict:
     """Announce the model now in play.
 
-    Sent on connect, on a manual switch, and — in auto mode — whenever the
-    router moves the session to a different model. ``reason`` is the
-    human-readable half of ``routing_hint`` ("code editing"), which is what the
-    chat trace shows; the raw hint is there for the client to key off.
+    Sent on connect, on a manual switch, in auto mode whenever the router moves
+    the session to a different model, and when a call *failed over* to another
+    model. ``reason`` is the human-readable half of ``routing_hint`` ("code
+    editing"), which is what the chat trace shows; the raw hint is there for
+    the client to key off.
+
+    ``fallback_from`` is set only on the last of those: it names the model
+    whose call failed, and its presence is how the client tells an involuntary
+    switch from a routing decision. Both land in the same toast — a user does
+    not care about the distinction in the moment — but they are worded
+    differently, and only a fallback is worth flagging as a problem.
     """
     return event(
         "model_changed",
@@ -348,11 +391,49 @@ def model_changed(
         routing_mode=routing_mode,
         routing_hint=routing_hint or "",
         reason=reason or "",
+        fallback_from=fallback_from or "",
     )
 
 
 def error(message: str) -> dict:
     return event("error", message=message)
+
+
+def branches(entries: list[dict]) -> dict:
+    """Which turns have been edited, and what versions each one has.
+
+    Sent on connect and after every operation that can change the set: an
+    edit, a regenerate, a branch switch. Always the whole picture rather than a
+    delta — there are at most a handful of entries even in a heavily edited
+    session, and a delta protocol for something this small is a bug farm.
+    """
+    return event("branches", branches=entries)
+
+
+def history_replaced(
+    reason: str, turn_index: int = -1, content: str = ""
+) -> dict:
+    """The server's copy of the conversation has been rewritten.
+
+    ``turn_index`` and ``content`` are what let the client redraw *without*
+    refetching, and they exist because refetching here is a race the client
+    loses. An edit truncates the checkpoint and immediately starts a new run,
+    so a client that answers this frame with "fetch me the transcript" reads a
+    checkpoint mid-rewrite: it comes back either empty or still holding the
+    turns that were just cut, and the new reply then streams on top of
+    whichever it got. The frame now says exactly what changed, so the client
+    cuts its own transcript at the same place instead of guessing.
+
+    For ``reason == "branch"`` both are omitted and the client refetches. There
+    is no run to race there, and that path replaces an arbitrary suffix with a
+    stored one — which is not expressible as a truncation.
+    """
+    return event(
+        "history_replaced",
+        reason=reason,
+        turn_index=turn_index,
+        content=content,
+    )
 
 
 # ---------------------------------------------------------------------------

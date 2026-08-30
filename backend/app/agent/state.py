@@ -9,6 +9,11 @@ class AgentState(TypedDict, total=False):
 
     session_id: str
 
+    # Which surface this turn belongs to: "chat" or "code". Attribution only —
+    # nothing routes on it. Defaults to "chat" on every read, so a checkpoint
+    # written before this field existed resumes without a KeyError.
+    section: str
+
     # Which model powers this session (see app.llm_router.MODEL_REGISTRY).
     # Carried in state so a mid-conversation switch survives checkpointing.
     # In auto mode this holds the model the *last* turn resolved to, so the

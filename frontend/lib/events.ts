@@ -117,6 +117,38 @@ export type ServerEvent =
       cost_estimate: number;
     }
   | { type: "agent_done"; ts: number; iterations: number; reason: string }
+  /**
+   * Which user turns have been edited, and what versions each one has. Sent on
+   * connect and after every edit, regenerate or branch switch — always the
+   * whole picture rather than a delta, because there are only ever a handful
+   * of entries and a delta protocol for something this small is a bug farm.
+   *
+   * `turn_index` counts *user turns*, not entries in the message array: a
+   * `tool_result` carrier has role "user" too. The client counts the same
+   * thing (items of kind "user"), which is what lets both sides agree on
+   * "the third message I sent" without exchanging ids.
+   */
+  | { type: "branches"; ts: number; branches: BranchGroup[] }
+  /**
+   * The conversation on the server is no longer the one on screen.
+   *
+   * For "edit" and "regenerate" the frame names the turn that was cut
+   * (`turn_index`, an ordinal among user turns) and the text replacing it, and
+   * the client truncates its own transcript there. Refetching instead is a
+   * race it loses: the re-run has already started, so the checkpoint being
+   * read is mid-rewrite.
+   *
+   * For "branch" both are absent (`turn_index` is -1) and the client refetches
+   * — no run follows a switch, and the change is a suffix replacement rather
+   * than a truncation.
+   */
+  | {
+      type: "history_replaced";
+      ts: number;
+      reason: "edit" | "regenerate" | "branch";
+      turn_index: number;
+      content: string;
+    }
   | { type: "max_iterations"; ts: number; iterations: number; message: string }
   /**
    * A per-turn tool-call ceiling was reached (a cost control — see
@@ -146,6 +178,13 @@ export type ServerEvent =
       routing_hint?: string;
       /** Human phrasing of the hint, e.g. "code editing". */
       reason?: string;
+      /**
+       * Non-empty only when the switch was NOT a choice: the selected model
+       * errored (rate limit, 5xx, unavailable) and the router retried on this
+       * one. Holds the id of the model that failed. `reason` then reads "hit a
+       * rate limit" rather than naming a routing hint.
+       */
+      fallback_from?: string;
     }
   | { type: "error"; ts: number; message: string }
   /* ---------------------------------------------------------------------
@@ -204,6 +243,20 @@ export type ServerEvent =
     };
 
 /** One agent tool, as the backend reports it. Never carries a key value. */
+/** One alternate version of a user turn, for the `‹ 1/2 ›` switcher. */
+export type BranchVersion = {
+  version: number;
+  label: string;
+  created_at?: string;
+};
+
+/** Every version recorded at one user turn, and which is currently live. */
+export type BranchGroup = {
+  turn_index: number;
+  active: number;
+  versions: BranchVersion[];
+};
+
 export type AgentToolMeta = {
   name: string;
   summary: string;
@@ -227,7 +280,27 @@ export type ClientEvent =
   | { type: "user_message"; content: string; file_ids?: string[] }
   /** `model_id: "auto"` selects the routing mode rather than a model. */
   | { type: "set_model"; model_id: string }
+  /**
+   * A request to stop, not an interrupt. The run finishes the frame it is on,
+   * keeps its partial answer, closes any tool call it had not started, bills
+   * the tokens actually generated, and ends with
+   * `agent_done.reason === "cancelled"`.
+   */
   | { type: "cancel" }
+  /** Replace user turn `turn_index` and re-run the conversation from there. */
+  | {
+      type: "edit_message";
+      turn_index: number;
+      content: string;
+      file_ids?: string[];
+    }
+  /**
+   * Re-run the most recent user turn. Uses whichever model is selected *now*,
+   * which need not be the one that answered the first time.
+   */
+  | { type: "regenerate" }
+  /** Make a stored branch the live conversation again. */
+  | { type: "switch_branch"; turn_index: number; version: number }
   | { type: "ping" }
   /**
    * Answers a paused run. Agents section only. `parameters` is read for

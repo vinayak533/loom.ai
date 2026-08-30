@@ -74,6 +74,19 @@ EXPECTED: list[tuple[str, str | None]] = [
     ("credit_ledger", "agent_id"),
     ("agent_approvals", None),
     ("agent_approvals", "decision"),
+    # Message actions. `message_branches` is what makes an edit non-destructive
+    # — without it, editing an earlier message overwrites the replies that
+    # followed it and the "1/2" switcher has nothing to switch to.
+    ("message_branches", None),
+    ("message_branches", "turn_index"),
+    ("message_branches", "version"),
+    ("message_branches", "is_active"),
+    ("message_feedback", None),
+    ("message_feedback", "rating"),
+    # Per-account preferences. The default model has to follow the account
+    # rather than the browser, which is the whole reason this table exists.
+    ("user_preferences", None),
+    ("user_preferences", "default_model_id"),
 ]
 
 

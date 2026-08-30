@@ -17,12 +17,14 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app import cancel
+from app.api import rerun
 from app import events as ev
 from app.agent import runner
 from app.agent.llm import generate_title
 from app.api.auth import resolve_user
-from app.api.ownership import owns_session
-from app.credits import InsufficientCredits, ensure_can_start
+from app.api.ownership import owns_row
+from app.credits import InsufficientCredits, ensure_can_start, prime_balance
 from app.api.ratelimit import RateLimiter
 from app.config import get_settings
 from app.db import repository
@@ -36,6 +38,7 @@ from app.llm_router import (
     is_available,
     model_meta,
     resolve_stored_model,
+    section_default_model,
 )
 from app.tools.preview import preview_manager
 from app.tools.sandbox import sandbox_manager
@@ -64,9 +67,17 @@ async def agent_socket(
     settings = get_settings()
     section = section if section in ("chat", "code") else "chat"
 
+    # Two independent round trips — verifying the token against Supabase Auth,
+    # and reading the session row — that used to run one after the other, for
+    # ~305 ms of dead time before the socket was even accepted. Neither needs
+    # the other's answer: the row is fetched by id, and only the *comparison*
+    # below needs both. Overlapping them costs one round trip instead of two.
+    user_task = asyncio.create_task(resolve_user(token))
+    row_task = asyncio.create_task(repository.get_session(session_id))
     try:
-        user_id = await resolve_user(token)
+        user_id = await user_task
     except Exception:  # noqa: BLE001 - HTTPException from resolve_user
+        row_task.cancel()
         await websocket.close(code=4401, reason="Unauthorized")
         return
 
@@ -75,7 +86,8 @@ async def agent_socket(
     # stranger's conversation and both read its replay and continue it. An id
     # with no row yet is allowed through: this handler is where a new Chat/Code
     # session is created, so the connect necessarily precedes the row.
-    if not await owns_session(user_id, session_id):
+    row = await row_task
+    if not owns_row(user_id, row):
         await websocket.close(code=4403, reason="Forbidden")
         return
 
@@ -102,6 +114,11 @@ async def agent_socket(
     # keeps showing a preview whose Stop button now does nothing. Saying "there
     # is no preview here" on every connect makes the client's state a function
     # of the server's rather than of its own history.
+    # Warm the credit snapshot while the user is still reading the screen, so
+    # the first turn's gate is answered from memory instead of paying a
+    # Supabase round trip at the exact moment latency is most visible.
+    asyncio.create_task(prime_balance(user_id))
+
     live = preview_manager.status(session_id)
     if live.get("running"):
         emitter.emit(
@@ -111,12 +128,18 @@ async def agent_socket(
         emitter.emit(ev.preview_stopped(None, "absent"))
 
     # Resolve the session's model so a reconnect honours the saved selection.
-    row = await repository.get_session(session_id)
+    # `row` is the one already read for the ownership check above — re-reading
+    # it here was a second ~153 ms Supabase round trip on every connect.
     # A session stored against a model that has since been retired is switched
     # to the default here rather than being allowed to fail at dispatch on its
     # next turn. The new value is persisted so the swap happens once.
+    # A brand-new session has no stored model, so it opens on the default for
+    # the section that opened this socket — `section_default_model` is the one
+    # place that mapping lives. An existing session's stored pick is honoured
+    # and only reassigned when it has gone stale.
     current_model, model_notice = resolve_stored_model(
-        row.get("model_id") if row else None
+        row.get("model_id") if row else None,
+        default=section_default_model(section),
     )
     if row is not None and model_notice:
         await repository.touch_session(session_id, model_id=current_model)
@@ -136,6 +159,12 @@ async def agent_socket(
     if model_notice:
         emitter.emit(ev.notice(model_notice))
 
+    # Which turns carry a `‹ 1/2 ›` switcher. Sent on every connect, because
+    # the transcript is replayed from the checkpoint on every connect and the
+    # switchers are drawn onto it — a reload without this shows an edited
+    # conversation with no way back to what it replaced.
+    asyncio.create_task(rerun.emit_branches(session_id, emitter))
+
     try:
         while True:
             frame = await websocket.receive_json()
@@ -146,8 +175,15 @@ async def agent_socket(
                 continue
 
             if kind == "cancel":
+                # Cooperative, not an interrupt. `run_task.cancel()` tore the
+                # node down mid-stream, which threw away the partial answer the
+                # user was already reading, billed nothing for tokens the
+                # provider had produced, and — when it landed during a tool
+                # batch — left a `tool_use` block with no matching result. The
+                # flag lets the graph finish the turn properly instead; see
+                # app/cancel.py and app/turnstop.py.
                 if run_task and not run_task.done():
-                    run_task.cancel()
+                    cancel.request_stop(session_id)
                 continue
 
             if kind == "set_model":
@@ -161,6 +197,63 @@ async def agent_socket(
                     _emit_model(emitter, mid)
                 else:
                     emitter.emit(ev.error(f"Unknown model `{mid}`."))
+                continue
+
+            if kind == "edit_message" or kind == "regenerate":
+                # Both are the same operation with a different starting point:
+                # rewind the conversation to a user turn, then run it again.
+                # Edit supplies new text for that turn; regenerate reuses what
+                # is already there.
+                if run_task and not run_task.done():
+                    emitter.emit(
+                        ev.error("The agent is still working — stop it first.")
+                    )
+                    continue
+
+                allowed, retry_after = _limiter.check(session_id)
+                if not allowed:
+                    emitter.emit(
+                        ev.error(
+                            f"Rate limit reached "
+                            f"({settings.rate_limit_messages_per_minute}/min). "
+                            f"Try again in {retry_after}s."
+                        )
+                    )
+                    continue
+
+                prepared = await rerun.prepare_rerun(
+                    runner, session_id, frame, kind, emitter
+                )
+                if prepared is None:
+                    continue
+                new_text, turn_index, version, file_ids = prepared
+
+                emitter.emit(ev.history_replaced(kind, turn_index, new_text))
+                run_task = asyncio.create_task(
+                    _run(
+                        session_id,
+                        new_text,
+                        file_ids,
+                        emitter,
+                        current_model,
+                        user_id,
+                        section,
+                        # A re-run must not rename the session: the title was
+                        # generated from the *first* message and editing turn
+                        # five has nothing to say about it.
+                        title_it=False,
+                        branch=(turn_index, version),
+                    )
+                )
+                continue
+
+            if kind == "switch_branch":
+                if run_task and not run_task.done():
+                    emitter.emit(
+                        ev.error("The agent is still working — stop it first.")
+                    )
+                    continue
+                await rerun.switch_branch(runner, session_id, frame, emitter)
                 continue
 
             if kind != "user_message":
@@ -197,6 +290,7 @@ async def agent_socket(
                     emitter,
                     run_model,
                     user_id,
+                    section,
                 )
             )
 
@@ -355,15 +449,33 @@ async def _run(
     emitter: Emitter,
     model_id: str,
     user_id: str | None = None,
+    section: str = "chat",
+    title_it: bool = True,
+    branch: tuple[int, int] | None = None,
 ) -> None:
+    """One turn, start to finish.
+
+    ``title_it`` is False for a re-run: the session was named from its opening
+    message and editing a later turn says nothing about what the conversation
+    is called.
+
+    ``branch`` is ``(turn_index, version)`` when this turn is an edit or a
+    regenerate. The answer it produces is recorded as that version once the run
+    ends, which is what puts the new reply behind the ``2/2`` half of the
+    switcher.
+    """
     # Both of these are two Supabase round trips standing between the user
     # hitting enter and the first token of the model call. Nothing in the run
     # reads them back, so they go out in the background.
     # Refuse a turn that cannot pay for its first model call, before anything
     # is written or any provider is contacted. Chat and Code went unmetered
     # entirely until this existed, while the UI showed a balance the whole time.
+    # Any stop asked for while nothing was running would otherwise land on this
+    # turn and end it before its first token.
+    cancel.clear(session_id)
+
     try:
-        await ensure_can_start(user_id, "chat")
+        await ensure_can_start(user_id, section)
     except InsufficientCredits as exc:
         emitter.emit(ev.error(str(exc)))
         emitter.emit(ev.agent_done(0, "insufficient_credits"))
@@ -377,11 +489,18 @@ async def _run(
             sandbox_id=sandbox_manager.sandbox_id_for(session_id),
         )
     )
-    asyncio.create_task(_maybe_title(session_id, text))
+    if title_it:
+        asyncio.create_task(_maybe_title(session_id, text))
 
     try:
         final = await runner.run_turn(
-            session_id, text, emitter, file_ids, model_id=model_id, user_id=user_id
+            session_id,
+            text,
+            emitter,
+            file_ids,
+            model_id=model_id,
+            user_id=user_id,
+            section=section,
         )
         reason = final.get("stop_reason") or "end_turn"
         if reason != "max_iterations":
@@ -395,10 +514,29 @@ async def _run(
         emitter.emit(ev.error(f"{type(exc).__name__}: {exc}"))
         emitter.emit(ev.agent_done(0, "error"))
     finally:
-        await repository.touch_session(
-            session_id,
-            status="idle",
-            sandbox_id=sandbox_manager.sandbox_id_for(session_id),
+        # Fired, not awaited. The client has already been sent `agent_done` by
+        # this point, so it believes the turn is over and its composer is live
+        # again — but the socket's "is a run in flight" guard is
+        # `run_task.done()`, and awaiting a Supabase round trip here kept that
+        # task alive for ~150 ms *after* the user was told to go ahead. Send a
+        # second message inside that window and it came back "The agent is
+        # still working - cancel it first", for a turn that had finished.
+        # Nothing reads this write, so it does not belong on that path.
+        repository.fire(
+            repository.touch_session(
+                session_id,
+                status="idle",
+                sandbox_id=sandbox_manager.sandbox_id_for(session_id),
+            )
+        )
+        # The turn is over either way — completed, stopped or failed — so the
+        # flag must not survive into the next one.
+        cancel.clear(session_id)
+        # Branch bookkeeping, after the run rather than during it: the answer
+        # this turn produced is part of the branch it belongs to, and it does
+        # not exist until now.
+        asyncio.create_task(
+            rerun.settle_branches(runner, session_id, emitter, branch)
         )
 
 

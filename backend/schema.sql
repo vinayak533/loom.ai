@@ -10,7 +10,10 @@ create table if not exists public.sessions (
   user_id     uuid references auth.users (id) on delete cascade,
   title       text        not null default 'New session',
   -- A router model id, or the literal 'auto' for task-based routing.
-  model_id    text        not null default 'grok-4-5',
+  -- Kept in step with DEFAULT_MODEL_ID in backend/app/config.py. A row holding
+  -- a model that has since been retired is not a problem: resolve_stored_model()
+  -- reassigns it on load and tells the user once.
+  model_id    text        not null default 'qwen3_7_plus',
   sandbox_id  text,
   status      text        not null default 'idle',   -- idle | running | error
   created_at  timestamptz not null default now(),
@@ -18,7 +21,12 @@ create table if not exists public.sessions (
 );
 -- Add model_id to an existing table without recreating it.
 alter table public.sessions
-  add column if not exists model_id text not null default 'grok-4-5';
+  add column if not exists model_id text not null default 'qwen3_7_plus';
+-- Retarget the column default on a database created before the current
+-- default model. `add column if not exists` is a no-op once the column is
+-- there, so without this the old default survives every later schema apply.
+alter table public.sessions
+  alter column model_id set default 'qwen3_7_plus';
 -- History management: a pinned session sorts above everything else; an
 -- archived one leaves the default list without being destroyed. Both are
 -- plain flags rather than a single `state` column because they are
@@ -401,6 +409,128 @@ create table if not exists public.course_exam_attempts (
 create index if not exists course_exam_attempts_user_idx
   on public.course_exam_attempts (user_id, course_id, created_at desc);
 
+-- ============================================================================
+--  Conversation branches — what an edited message did to the thread
+-- ============================================================================
+-- Editing an earlier message re-runs the conversation from that point. The
+-- replies that already existed are not wrong, they are simply no longer the
+-- branch being read, and deleting them is the one outcome nobody wants: the
+-- edit was an experiment, and the thing you experiment against has to survive.
+--
+-- Two models were on the table.
+--
+--   A tree keyed by parent message. Correct, general, and a poor fit here:
+--   nothing in this system has a per-message identity to be a parent. The
+--   conversation the agent actually reads is `AgentState["messages"]`, a flat
+--   list inside a LangGraph checkpoint, and message rows in `public.messages`
+--   are an append-only log written with `fire()` that no reader ever joins on.
+--   A tree would have meant giving every message a stable id in two stores and
+--   keeping them in step.
+--
+--   Versioned suffixes — this one. A branch is "everything the conversation
+--   was from turn N onwards", stored whole. The checkpoint stays the single
+--   live source of truth for what the agent sees; switching branches restores
+--   a snapshot into it. Nothing about the existing message format changes, and
+--   a session that never edits anything never writes a row here.
+--
+-- `turn_index` counts *user turns* (0-based), not entries in the messages
+-- array: a `tool_result` carrier has role 'user' too, and indexing on the raw
+-- array would move every branch pointer the moment a turn used a tool. The
+-- frontend counts the same thing when it labels the switcher, so both sides
+-- agree without exchanging ids. See `repository.user_turn_positions`.
+create table if not exists public.message_branches (
+  id          uuid primary key default uuid_generate_v4(),
+  -- Text rather than a uuid FK, for the same reason `credit_ledger.session_id`
+  -- is: agent sessions live in a different graph and are not guaranteed to
+  -- have a row in `public.sessions` at the moment a branch is written.
+  session_id  text        not null,
+  user_id     text,
+  turn_index  integer     not null,
+  -- 1-based. Version 1 is always the original — the branch that existed before
+  -- anything was edited — so "1/2" reads the way the user expects.
+  version     integer     not null,
+  -- The first ~120 characters of that version's user message. Denormalised so
+  -- the switcher can label a branch without loading the whole snapshot.
+  label       text,
+  -- The conversation from `turn_index` onwards, in the checkpoint's own block
+  -- format. Restoring a branch is: truncate live messages to the turn, extend
+  -- with this.
+  messages    jsonb       not null default '[]',
+  created_at  timestamptz not null default now()
+);
+-- Which version is the one currently spliced into the checkpoint. Exactly one
+-- row per (session, turn_index) carries it. It has to be stored rather than
+-- inferred: on a cold page load the only evidence of which branch is live is
+-- the live conversation itself, and comparing snapshots to guess would be both
+-- expensive and wrong the moment two versions began with the same message.
+alter table public.message_branches
+  add column if not exists is_active boolean not null default false;
+
+-- One row per (session, turn, version). The upsert path relies on this.
+create unique index if not exists message_branches_key_idx
+  on public.message_branches (session_id, turn_index, version);
+create index if not exists message_branches_session_idx
+  on public.message_branches (session_id, turn_index, version);
+
+-- ============================================================================
+--  Response feedback — thumbs up / down on an assistant message
+-- ============================================================================
+-- Deliberately inert: nothing reads this back into the product. It is a record
+-- that someone said a reply was good or bad, kept so the question "which model
+-- and which route produce answers people actually like" can be asked later
+-- against real data rather than reconstructed from nothing.
+--
+-- `message_key` is not `messages.id`. The transcript the user is looking at is
+-- replayed from the checkpoint, which has no row ids in it — so the key is the
+-- same coordinate the branch table uses: which session, and which turn within
+-- it. That is stable across a reload, which a client-generated id is not.
+create table if not exists public.message_feedback (
+  id           uuid primary key default uuid_generate_v4(),
+  session_id   text        not null,
+  user_id      text        not null default 'anonymous',
+  -- Which assistant turn, 0-based, counting assistant turns only.
+  turn_index   integer     not null,
+  rating       text        not null check (rating in ('up', 'down')),
+  -- Optional, short, and free text: "wrong", "too long", "great". Not a
+  -- taxonomy — one has to be earned from data, and there is none yet.
+  reason       text,
+  model_id     text,
+  section      text,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+-- One verdict per person per turn. Clicking thumbs-down after thumbs-up
+-- changes your mind; it does not cast a second vote.
+create unique index if not exists message_feedback_key_idx
+  on public.message_feedback (session_id, user_id, turn_index);
+create index if not exists message_feedback_rating_idx
+  on public.message_feedback (rating, created_at desc);
+
+-- ============================================================================
+--  Per-account preferences
+-- ============================================================================
+-- Settings that follow the person rather than the browser. The default model
+-- lived in localStorage, which meant signing in on a second device silently
+-- reset a choice the user had made on the first — the one thing an account is
+-- supposed to prevent.
+--
+-- One row per user, columns rather than a jsonb bag: there are three of them,
+-- they are each read on a hot path (the first socket connect), and a column
+-- that has to exist is better documented as a column.
+create table if not exists public.user_preferences (
+  user_id           text        primary key,
+  -- A router model id or the literal 'auto'. Null means "no preference
+  -- expressed", which is not the same as choosing the current default: the
+  -- default is allowed to change under a user who never picked one.
+  default_model_id  text,
+  -- Kept for honesty rather than for choice: this build is dark-only, and the
+  -- Settings panel says so. The column exists so that saying so is a value in
+  -- the data and not an assumption baked into the absence of one.
+  theme             text        not null default 'dark',
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+
 -- ------------------------------------------------------------- RLS policies
 -- The backend uses the service-role key and bypasses RLS. These policies exist
 -- so the browser (anon key) can only ever read its own rows.
@@ -502,6 +632,29 @@ create policy "own course progress" on public.course_progress
 drop policy if exists "own exam attempts" on public.course_exam_attempts;
 create policy "own exam attempts" on public.course_exam_attempts
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+
+-- The three tables added with message actions, feedback and per-account
+-- preferences. Same rule as everything above: the backend holds the
+-- service-role key and bypasses these entirely, so they exist to stop the
+-- browser's anon key reading somebody else's branches, verdicts or settings.
+alter table public.message_branches  enable row level security;
+alter table public.message_feedback  enable row level security;
+alter table public.user_preferences  enable row level security;
+
+drop policy if exists "own branches" on public.message_branches;
+create policy "own branches" on public.message_branches
+  for select using (auth.uid()::text = user_id);
+
+drop policy if exists "own feedback" on public.message_feedback;
+create policy "own feedback" on public.message_feedback
+  for all using (auth.uid()::text = user_id)
+  with check (auth.uid()::text = user_id);
+
+drop policy if exists "own preferences" on public.user_preferences;
+create policy "own preferences" on public.user_preferences
+  for all using (auth.uid()::text = user_id)
+  with check (auth.uid()::text = user_id);
 
 -- ------------------------------------------------------------------ storage
 -- Create a private bucket named `uploads` in Storage, or run:

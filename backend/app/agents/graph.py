@@ -29,11 +29,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from app import events as ev
+from app.cancel import is_stopping
+from app.turnstop import (
+    STOPPED_TOOL_TEXT,
+    approx_tokens,
+    partial_assistant_content,
+    stopped_result_block,
+)
 from app.agents import registry
 from app.agents.state import SpecialistState
 from app.agents.tool_registry import run as run_agent_tool, schemas_for
@@ -45,16 +53,18 @@ from app.emitter import Emitter, emitter_from_config
 from app.llm_router import (
     HINT_REASON,
     AUTO_MODEL_ID,
+    FallbackNotice,
     ModelCallError,
     ModelUnavailableError,
     auto_pool_available,
     auto_route,
-    call_model,
+    effective_default_model,
     display_name,
     estimate_cost,
     is_available,
     model_for_hint,
     model_meta,
+    stream_with_fallback,
 )
 
 log = logging.getLogger(__name__)
@@ -151,7 +161,7 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
         return _stopped(state, list(state.get("messages") or []), "", "manual", "", 0, "error")
 
     # --- model selection --------------------------------------------------
-    previous_model = state.get("model_id") or settings.default_model_id
+    previous_model = state.get("model_id") or effective_default_model()
     routing_mode = state.get("routing_mode") or "manual"
     routing_hint = ""
 
@@ -165,7 +175,11 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
         if not is_available(model_id):
             raise ModelUnavailableError(model_id)
     except ModelUnavailableError:
-        model_id = settings.default_model_id
+        # The configured default can itself be unavailable (a
+        # `DEFAULT_MODEL_ID` whose provider key is unset), so falling back to
+        # it verbatim just re-raises the same failure a line later. Resolve to
+        # a model that actually has a key instead.
+        model_id = effective_default_model()
         meta = model_meta(model_id)
 
     if emitter and routing_mode == "auto" and model_id != previous_model:
@@ -193,6 +207,27 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
         return _stopped(
             state, messages, model_id, routing_mode, routing_hint,
             iterations, "max_iterations",
+        )
+
+    # --- stop requested while the tools were running ----------------------
+    # After the `tool_results` flush and before the model call, exactly as in
+    # the Chat/Code loop: the flush is what pairs each `tool_use` block with a
+    # `tool_result`, so returning before it would leave history the provider
+    # rejects on the next turn.
+    if is_stopping(session_id):
+        # Ends on an assistant turn, not on the flushed tool results — see the
+        # matching note in the Chat/Code loop.
+        messages.append(
+            {"role": "assistant", "content": partial_assistant_content("")}
+        )
+        repository.fire(
+            repository.add_message(
+                session_id, "assistant", partial_assistant_content("")
+            )
+        )
+        return _stopped(
+            state, messages, model_id, routing_mode, routing_hint,
+            iterations - 1, "cancelled",
         )
 
     # A specialist that cannot call tools is a specialist stripped of its
@@ -263,15 +298,46 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
             )
         )
 
+    # Automatic fallback on a provider-side failure — same contract as the
+    # Chat/Code loop. `model_id` is rebound afterwards so the specialist's
+    # accounting names the model that actually answered.
+    fallback_state: dict[str, Any] = {"model_id": model_id, "notices": []}
+
+    def _on_fallback(notice: FallbackNotice) -> None:
+        fallback_state["model_id"] = notice.next_model_id
+        fallback_state["notices"].append(notice)
+        if emitter:
+            nxt_meta = model_meta(notice.next_model_id)
+            emitter.emit(
+                ev.model_changed(
+                    model_id=notice.next_model_id,
+                    name=notice.next_name,
+                    supports_tools=nxt_meta["supports_tools"],
+                    available=True,
+                    note=f"{notice.failed_name} {notice.reason}",
+                    routing_mode=routing_mode,
+                    routing_hint=routing_hint,
+                    reason=notice.reason,
+                    fallback_from=notice.failed_model_id,
+                )
+            )
+
     try:
-        stream = call_model(
+        stream = stream_with_fallback(
             model_id,
             messages=messages,
             tools=tools,
             system=system,
-            stream=True,
+            on_fallback=_on_fallback,
+            section="agents",
         )
         response = None
+        # See app/turnstop.py. A stopped stream never delivers the `done` frame
+        # that carries the assembled message, so what the provider produced
+        # before the stop exists only in these two accumulators.
+        partial_text = ""
+        partial_thinking = ""
+        stopped = False
         async for se in stream:
             if emitter:
                 if se.kind == "thinking_start":
@@ -286,20 +352,110 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
                     emitter.emit(ev.token(se.content or ""))
                 elif se.kind == "text_end":
                     emitter.emit(ev.message_end())
-            if se.kind == "done":
+            if se.kind == "thinking_delta":
+                partial_thinking += se.content or ""
+            elif se.kind == "text_delta":
+                partial_text += se.content or ""
+            elif se.kind == "done":
                 response = se.message
+            # Honoured at a frame boundary, never inside one.
+            if is_stopping(session_id):
+                stopped = True
+                break
+        if stopped:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:  # noqa: BLE001
+                    log.debug("Stream close failed on stop", exc_info=True)
     except (ModelUnavailableError, ModelCallError) as exc:
-        log.warning("Specialist %s model call failed: %s", agent_id, exc)
+        log.warning(
+            "Specialist %s model call failed on %s (last attempted: %s): %s",
+            agent_id, model_id, fallback_state["model_id"], exc,
+        )
         if emitter:
-            emitter.emit(ev.error(str(exc)))
+            # Same reasoning as the Chat/Code loop: the provider's raw payload
+            # is for the log line above, not for the transcript.
+            emitter.emit(
+                ev.error(
+                    exc.user_message()
+                    if isinstance(exc, ModelCallError)
+                    else str(exc)
+                )
+            )
         return _stopped(state, messages, model_id, routing_mode, routing_hint, iterations, "error")
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - surfaced to the user, run ends
         log.exception("Specialist %s model call failed", agent_id)
         if emitter:
-            emitter.emit(ev.error(f"Model call failed: {exc}"))
+            emitter.emit(
+                ev.error(
+                    "The model call failed unexpectedly. See the server log "
+                    f"for details ({type(exc).__name__})."
+                )
+            )
         return _stopped(state, messages, model_id, routing_mode, routing_hint, iterations, "error")
+
+    # `model_id` stays the session's *selection*; `answered_by` is the model
+    # that actually produced this response. A fallback moves the second and
+    # never the first — see the longer note in the Chat/Code loop.
+    answered_by = fallback_state["model_id"]
+
+    # --- the user stopped mid-stream --------------------------------------
+    # Finished here rather than falling through, for the reasons set out in the
+    # Chat/Code loop: a stopped stream has no assembled message and no `usage`,
+    # so everything below would either crash on None or bill nothing for output
+    # the provider really did produce.
+    if stopped:
+        content = partial_assistant_content(partial_text, partial_thinking)
+        messages.append({"role": "assistant", "content": content})
+
+        est = {
+            "input_tokens": 0,
+            "output_tokens": approx_tokens(partial_text + partial_thinking),
+        }
+        cost = estimate_cost(answered_by, est)
+        totals = dict(state.get("usage") or {})
+        totals["output_tokens"] = totals.get("output_tokens", 0) + est["output_tokens"]
+        totals["cost_estimate"] = round(totals.get("cost_estimate", 0.0) + cost, 6)
+
+        spent = float(state.get("credits_spent") or 0.0)
+        spent += await charge_llm(
+            state.get("user_id") or None,
+            session_id=session_id,
+            agent_id=agent_id,
+            model_id=answered_by,
+            cost_usd=cost,
+        )
+
+        if emitter:
+            emitter.emit(
+                ev.usage(
+                    totals.get("input_tokens", 0),
+                    totals["output_tokens"],
+                    totals["cost_estimate"],
+                )
+            )
+            await _emit_credits(emitter, state.get("user_id") or None, spent)
+
+        repository.fire(repository.add_message(session_id, "assistant", content))
+
+        return {
+            "messages": messages,
+            "model_id": model_id,
+            "routing_mode": routing_mode,
+            "routing_hint": routing_hint,
+            # An incomplete `tool_use` must never be executed; dropping it here
+            # is what keeps a stop from orphaning one in the history.
+            "pending": [],
+            "tool_results": [],
+            "iterations": iterations,
+            "stop_reason": "cancelled",
+            "usage": totals,
+            "credits_spent": round(spent, 4),
+        }
 
     if response is None:  # pragma: no cover - defensive
         if emitter:
@@ -310,7 +466,7 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
     messages.append({"role": "assistant", "content": content})
 
     # --- accounting -------------------------------------------------------
-    cost = estimate_cost(model_id, response.usage)
+    cost = estimate_cost(answered_by, response.usage)
     totals = dict(state.get("usage") or {})
     totals["input_tokens"] = totals.get("input_tokens", 0) + response.usage.get("input_tokens", 0)
     totals["output_tokens"] = totals.get("output_tokens", 0) + response.usage.get("output_tokens", 0)
@@ -324,7 +480,7 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
         state.get("user_id") or None,
         session_id=session_id,
         agent_id=agent_id,
-        model_id=model_id,
+        model_id=answered_by,
         cost_usd=cost,
     )
     spent += charged
@@ -342,7 +498,7 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
             response.usage.get("input_tokens", 0),
             response.usage.get("output_tokens", 0),
             cost,
-            model_id=model_id,
+            model_id=answered_by,
             routing_mode=routing_mode,
             routing_hint=routing_hint,
         )
@@ -386,7 +542,14 @@ async def _emit_credits(emitter: Emitter, user_id: str | None, spent: float) -> 
 
 
 def route_from_agent(state: SpecialistState) -> str:
-    if state.get("stop_reason") in {"max_iterations", "error", "refusal"}:
+    # "cancelled" is terminal for the same reason the others are: the turn has
+    # already had its partial answer stored and its tool calls closed.
+    if state.get("stop_reason") in {
+        "max_iterations",
+        "error",
+        "refusal",
+        "cancelled",
+    }:
         return END
     return "tools" if state.get("pending") else END
 
@@ -504,6 +667,7 @@ def _refused_for_budget(block: dict, budget: int) -> dict:
 
 async def tool_node(state: SpecialistState, config: RunnableConfig) -> dict:
     emitter = emitter_from_config(config)
+    session_id = state["session_id"]
     pending = list(state.get("pending") or [])
     if not pending:
         return {}
@@ -539,7 +703,29 @@ async def tool_node(state: SpecialistState, config: RunnableConfig) -> dict:
     if not pending:
         results = []
     elif len(pending) == 1 or not safe:
-        results = [await _execute_call(state, b, emitter, charges) for b in pending]
+        # A stop is honoured between calls, never inside one: a tool that has
+        # already started is allowed to finish, because half of a `send_email`
+        # or a `generate_image` cannot be undone. Calls that never started are
+        # closed with a result so no `tool_use` is left unanswered.
+        results = []
+        for block in pending:
+            if is_stopping(session_id):
+                if emitter:
+                    emitter.emit(
+                        ev.tool_call_start(
+                            block.get("name") or "tool",
+                            block.get("input") or {},
+                            block["id"],
+                        )
+                    )
+                    emitter.emit(
+                        ev.tool_call_result(
+                            block["id"], STOPPED_TOOL_TEXT, True, {"stopped": True}
+                        )
+                    )
+                results.append(stopped_result_block(block["id"]))
+                continue
+            results.append(await _execute_call(state, block, emitter, charges))
     else:
         gathered = await asyncio.gather(
             *(_execute_call(state, b, emitter, charges) for b in pending),

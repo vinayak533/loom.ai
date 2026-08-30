@@ -24,7 +24,7 @@ from app.agents.registry import get_agent
 from app.config import get_settings
 from app.emitter import Emitter
 from app.files import load_content_blocks
-from app.llm_router import AUTO_MODEL_ID
+from app.llm_router import AUTO_MODEL_ID, effective_default_model
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +96,25 @@ async def get_state(session_id: str) -> dict[str, Any]:
     return dict(snapshot.values or {})
 
 
+async def set_messages(session_id: str, messages: list[dict[str, Any]]) -> None:
+    """Replace a specialist conversation in the checkpoint.
+
+    The Chat/Code twin of this is `app.agent.runner.set_messages`, and the note
+    there about `messages` having no reducer applies here identically —
+    `SpecialistState` declares it as a plain list on purpose.
+    """
+    graph = get_graph()
+    await graph.aupdate_state(
+        {"configurable": {"thread_id": session_id}},
+        {
+            "messages": list(messages),
+            "pending": [],
+            "tool_results": [],
+            "stop_reason": "",
+        },
+    )
+
+
 async def run_turn(
     session_id: str,
     agent_id: str,
@@ -115,12 +134,12 @@ async def run_turn(
     history = list(prior.get("messages") or [])
     history.append(build_user_message(text, attachments))
 
-    selection = model_id or prior.get("model_id") or settings.default_model_id
+    selection = model_id or prior.get("model_id") or effective_default_model()
     if selection == AUTO_MODEL_ID:
         routing_mode = "auto"
-        effective = prior.get("model_id") or settings.default_model_id
+        effective = prior.get("model_id") or effective_default_model()
         if effective == AUTO_MODEL_ID:
-            effective = settings.default_model_id
+            effective = effective_default_model()
     else:
         routing_mode = "manual"
         effective = selection

@@ -15,7 +15,7 @@ from app.agent.graph import build_graph, build_user_message
 from app.config import get_settings
 from app.emitter import Emitter
 from app.files import load_content_blocks
-from app.llm_router import AUTO_MODEL_ID
+from app.llm_router import AUTO_MODEL_ID, effective_default_model
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +93,33 @@ async def get_state(session_id: str) -> dict[str, Any]:
     return dict(snapshot.values or {})
 
 
+async def set_messages(session_id: str, messages: list[dict[str, Any]]) -> None:
+    """Replace the checkpointed conversation for a session.
+
+    This is what makes an edit or a branch switch real rather than cosmetic.
+    `AgentState["messages"]` is a plain list with no reducer on it, so
+    `aupdate_state` replaces it outright — which is exactly the semantics
+    needed here, and would not be if the field ever grew an `add_messages`
+    annotation. If it does, this has to become a rewrite of the channel rather
+    than an update, or every branch switch will append instead of replacing.
+
+    `pending` and `tool_results` are cleared alongside it. They describe work
+    belonging to the turn that is being cut away; leaving them would have the
+    next turn flush results for tool calls that are no longer in the
+    conversation, which the provider rejects.
+    """
+    graph = get_graph()
+    await graph.aupdate_state(
+        {"configurable": {"thread_id": session_id}},
+        {
+            "messages": list(messages),
+            "pending": [],
+            "tool_results": [],
+            "stop_reason": "",
+        },
+    )
+
+
 async def run_turn(
     session_id: str,
     text: str,
@@ -100,8 +127,15 @@ async def run_turn(
     file_ids: list[str] | None = None,
     model_id: str | None = None,
     user_id: str | None = None,
+    section: str = "chat",
 ) -> dict[str, Any]:
-    """Append a user message and run the loop until the agent stops."""
+    """Append a user message and run the loop until the agent stops.
+
+    ``section`` is which surface this turn belongs to — 'chat' or 'code'. It
+    is carried into graph state purely for attribution: the credit ledger, the
+    `token_usage` row and the fallback log all record it, and every one of
+    them said "chat" for Code turns before it was threaded through.
+    """
     graph = get_graph()
     config = _config(session_id, emitter)
     settings = get_settings()
@@ -114,14 +148,14 @@ async def run_turn(
     # Selection precedence: explicit arg > prior checkpointed state > default.
     # `AUTO_MODEL_ID` is a mode rather than a model, so it is unpacked here
     # into `routing_mode` and never travels on into dispatch.
-    selection = model_id or prior.get("model_id") or settings.default_model_id
+    selection = model_id or prior.get("model_id") or effective_default_model()
     if selection == AUTO_MODEL_ID:
         routing_mode = "auto"
         # Seed with the model the last auto turn resolved to, so the graph can
         # tell "unchanged" from "just switched" and stays quiet when it should.
-        effective_model = prior.get("model_id") or settings.default_model_id
+        effective_model = prior.get("model_id") or effective_default_model()
         if effective_model == AUTO_MODEL_ID:
-            effective_model = settings.default_model_id
+            effective_model = effective_default_model()
     else:
         # An existing session that never opted into auto keeps its saved
         # model: absent state means manual, it is never inferred.
@@ -130,6 +164,7 @@ async def run_turn(
 
     payload = {
         "session_id": session_id,
+        "section": section,
         "model_id": effective_model,
         "routing_mode": routing_mode,
         "routing_hint": "" if routing_mode == "manual" else prior.get("routing_hint", ""),
