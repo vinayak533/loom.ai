@@ -19,11 +19,16 @@ from app.db import repository
 from app.emitter import registry as emitter_registry
 from app.files import UploadRejected, save_upload
 from app.llm_router import (
+    AUTO_MODEL_ID,
+    MODEL_REGISTRY,
     HINT_MODEL,
     auto_pool_available,
     auto_route,
+    effective_default_model,
     available_models,
     display_name,
+    section_default_model,
+    section_default_models,
 )
 from app.sources import ingest_youtube, is_youtube_url
 from app.tools import git, workspace
@@ -41,6 +46,32 @@ async def config():
     """Which integrations are wired up. Booleans only — never key values."""
     summary = get_settings().public_summary()
     summary["models"] = available_models()
+    # `default_model_id` is what the client opens every new session on, so it
+    # has to name a model the client can actually see in `models`. The raw
+    # setting is only a preference: when its provider key is unset the model is
+    # hidden from the list, and reporting it here left the selector showing an
+    # id it could not resolve and a first turn that could not run. Report the
+    # preference separately so the UI can still say what is configured.
+    summary["configured_default_model_id"] = summary["default_model_id"]
+    summary["default_model_id"] = effective_default_model()
+    # Same treatment for the per-section map: `public_summary()` reports the
+    # configured preferences, and the client needs the models it will actually
+    # get. A section whose preferred model has no key resolves to one that has.
+    summary["configured_default_model_ids"] = summary["default_model_ids"]
+    summary["default_model_ids"] = section_default_models()
+    # Same reasoning for the section table the Auto label reads from: it is
+    # configuration and can name an unkeyed model, and `auto_route()` already
+    # resolves past one at dispatch. Report what will actually run.
+    summary["auto_routes"] = {
+        section: auto_route(section) for section in summary["auto_routes"]
+    }
+    # And once more for the same reason. `public_summary()` derives this from
+    # "is OPENCODE_API_KEY set", which is a proxy that can now be wrong: the
+    # pool also breaks when one of its models is unavailable for some other
+    # reason — an entry repointed at a refused vendor, say. Ask the router
+    # whether it can actually task-route rather than inferring it from a key,
+    # so the UI does not promise per-task routing that will not happen.
+    summary["auto_task_routing"] = auto_pool_available()
     return summary
 
 
@@ -69,10 +100,14 @@ async def create_session(
     otherwise identical rows. Defaults to 'chat' when absent so an older client
     cannot create an untagged session.
     """
-    settings = get_settings()
-    mid = model_id or settings.default_model_id
+    resolved_section = _section(section)
+    # The *section's* default, not the roster-wide one: a Code session opens on
+    # the Code model and a Chat session on the Chat model. An explicit
+    # `model_id` from the client still wins, which is what makes "new session
+    # keeping my current pick" work.
+    mid = model_id or section_default_model(resolved_section)
     return await repository.create_session(
-        str(uuid.uuid4()), user_id, model_id=mid, section=_section(section)
+        str(uuid.uuid4()), user_id, model_id=mid, section=resolved_section
     )
 
 
@@ -90,6 +125,37 @@ async def list_sessions(
     """
     return await repository.list_sessions(
         user_id, archived=archived, section=_section(section)
+    )
+
+
+@router.get("/sessions/search")
+async def search_sessions(
+    q: str = "",
+    user_id: str | None = Depends(bearer_user),
+    section: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 30,
+):
+    """Find sessions by title or by something said in them.
+
+    Two indexed `ilike` scans and a merge — no model is involved, and none
+    should be. A search box that waits on a generative call is both slower and
+    worse than one that does not, and this is a lookup, not a question.
+
+    Declared *above* `/sessions/{session_id}` on purpose. FastAPI matches
+    routes in declaration order, so the other way round "search" is swallowed
+    as a session id and this endpoint is unreachable.
+
+    An empty `q` returns an empty list rather than the whole shelf: the caller
+    for that is `GET /sessions`, and quietly answering a different question is
+    how a debounced input ends up fetching everything on every backspace.
+    """
+    return await repository.search_sessions(
+        q,
+        user_id=user_id,
+        section=_section(section) if section else None,
+        agent_id=agent_id,
+        limit=max(1, min(limit, 50)),
     )
 
 
@@ -227,8 +293,18 @@ async def session_messages(session_id: str, user_id: str | None = Depends(bearer
 
     `checkpoint` is the LangGraph state (authoritative for resuming the agent);
     `log` is the flat Supabase row list including every tool call and result.
+
+    `require_session_write`, not `require_session`, for the reason that helper
+    exists: the browser mints a session id locally and the websocket handler is
+    what inserts the row, so this endpoint is reachable — legitimately, on
+    every fresh session — before there is a row to find. A hard 404 there was
+    not protecting anything; it made the first load of every new session log a
+    404 on the server and print a red console error in the browser, for a
+    session that is simply empty. An empty trace is the honest answer. A row
+    that *does* exist is still ownership-checked, which is the case that
+    matters.
     """
-    await require_session(user_id, session_id)
+    await require_session_write(user_id, session_id)
     state = await runner.get_state(session_id)
     return {
         "checkpoint": {
@@ -664,4 +740,131 @@ async def route(section: str = "chat"):
         }
         if task_routed
         else {},
+    }
+
+
+# --- response feedback -----------------------------------------------------
+
+
+@router.get("/sessions/{session_id}/feedback")
+async def get_feedback(
+    session_id: str,
+    user_id: str | None = Depends(bearer_user),
+):
+    """This person's thumbs on this session, so the controls come back set.
+
+    Scoped to the caller, not the session. Two people looking at the same
+    shared transcript are entitled to disagree about it, and a control that
+    shows somebody else's verdict as your own is simply wrong.
+    """
+    await require_session(user_id, session_id)
+    return await repository.list_feedback(session_id, user_id or "anonymous")
+
+
+@router.post("/sessions/{session_id}/feedback")
+async def set_feedback(
+    session_id: str,
+    payload: dict,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Record — or withdraw — a verdict on one assistant turn.
+
+    `rating` is "up", "down", or null to clear. `turn_index` counts assistant
+    turns from zero, which is the same coordinate scheme the branch switcher
+    uses and for the same reason: a replayed transcript carries no per-message
+    row ids, so position is the only thing both ends can agree on.
+    """
+    await require_session_write(user_id, session_id)
+    payload = payload or {}
+    rating = payload.get("rating")
+    if rating not in (None, "up", "down"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "`rating` must be 'up', 'down' or null."
+        )
+    try:
+        turn_index = int(payload.get("turn_index"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "`turn_index` must be an integer."
+        ) from None
+
+    ok = await repository.set_feedback(
+        session_id,
+        turn_index,
+        rating,
+        user_id=user_id or "anonymous",
+        reason=(str(payload.get("reason") or "").strip() or None),
+        model_id=payload.get("model_id"),
+        section=payload.get("section"),
+    )
+    return {"ok": bool(ok), "turn_index": turn_index, "rating": rating}
+
+
+# --- per-account preferences ------------------------------------------------
+
+
+@router.get("/preferences")
+async def get_preferences(user_id: str | None = Depends(bearer_user)):
+    """Settings that follow the account rather than the browser.
+
+    An anonymous caller has no account to hang them on, so it gets an empty
+    object rather than a shared row — anonymous sessions are per-device by
+    definition, and pooling their preferences would let one browser change
+    another's.
+    """
+    if not user_id:
+        return {"user_id": None, "default_model_id": None, "theme": "dark"}
+    prefs = await repository.get_preferences(user_id)
+    return {
+        "user_id": user_id,
+        "default_model_id": prefs.get("default_model_id"),
+        "theme": prefs.get("theme") or "dark",
+    }
+
+
+@router.put("/preferences")
+async def put_preferences(
+    payload: dict,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Save preferences for the signed-in account.
+
+    `default_model_id` accepts a router model id, the literal 'auto', or ""
+    to clear the preference. Clearing is distinct from choosing the current
+    default: a user who has never expressed a preference should follow the
+    build's default when it changes, and one who has chosen should not.
+    """
+    if not user_id:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "Sign in to save preferences across devices.",
+        )
+    payload = payload or {}
+    model_id = payload.get("default_model_id")
+    if model_id is not None:
+        model_id = str(model_id).strip()
+        if model_id and model_id != AUTO_MODEL_ID and model_id not in MODEL_REGISTRY:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, f"Unknown model `{model_id}`."
+            )
+
+    theme = payload.get("theme")
+    if theme is not None:
+        theme = str(theme).strip().lower()
+        # This build ships one theme. Accepting arbitrary values would let the
+        # column fill with names nothing renders, and answering "saved" to a
+        # request that changes nothing visible is worse than declining it.
+        if theme not in ("dark",):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "This build is dark-only; `theme` must be 'dark'.",
+            )
+
+    saved = await repository.set_preferences(
+        user_id, default_model_id=model_id, theme=theme
+    )
+    return {
+        "user_id": user_id,
+        "default_model_id": saved.get("default_model_id"),
+        "theme": saved.get("theme") or "dark",
     }

@@ -211,7 +211,6 @@ _ENCODING_FOR_PROVIDER = {
     "openrouter": "cl100k_base",
     "opencode": "cl100k_base",
     "groq": "cl100k_base",
-    "xai": "cl100k_base",
 }
 
 #: The fallback. Four characters per token is the long-standing rule of thumb

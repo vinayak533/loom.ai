@@ -70,7 +70,12 @@ class Recorder:
         self.final_text = ""
 
     # --- fake provider ---------------------------------------------------
-    def call_model(self, model_id, messages, tools=None, system=None, **kw):
+    # Signature matches `llm_router.stream_with_fallback`, which is what the
+    # graph calls now: same positional shape as `call_model` plus the
+    # keyword-only `on_fallback` / `section`, both swallowed by **kw here.
+    # Nothing in this test exercises fallback — that is
+    # `scripts/test_model_fallback.py` — it only needs the boundary stubbed.
+    def stream_with_fallback(self, model_id, messages, tools=None, system=None, **kw):
         self.model_calls += 1
         self.tools_offered.append(len(tools or []))
         self.systems.append(system or "")
@@ -124,14 +129,14 @@ async def run_agent(agent_id: str, recorder: Recorder) -> tuple[dict, list[dict]
     emitter_registry.register(emitter, f"budget-test-{agent_id}")
 
     original = (
-        agents_graph.call_model,
+        agents_graph.stream_with_fallback,
         agents_graph.run_agent_tool,
         agents_graph.charge_llm,
         agents_graph.charge_tool,
         agents_graph._emit_credits,
         agents_graph.repository.fire,
     )
-    agents_graph.call_model = recorder.call_model
+    agents_graph.stream_with_fallback = recorder.stream_with_fallback
     agents_graph.run_agent_tool = recorder.run_tool
     # The meter is a separate concern with its own tests, and this must not
     # touch a real balance to prove a ceiling.
@@ -147,7 +152,7 @@ async def run_agent(agent_id: str, recorder: Recorder) -> tuple[dict, list[dict]
                 "session_id": f"budget-test-{agent_id}",
                 "agent_id": agent_id,
                 "user_id": "",
-                "model_id": "grok-4-5",
+                "model_id": "qwen3_7_plus",
                 "routing_mode": "manual",
                 "messages": [
                     {
@@ -173,7 +178,7 @@ async def run_agent(agent_id: str, recorder: Recorder) -> tuple[dict, list[dict]
         )
     finally:
         (
-            agents_graph.call_model,
+            agents_graph.stream_with_fallback,
             agents_graph.run_agent_tool,
             agents_graph.charge_llm,
             agents_graph.charge_tool,

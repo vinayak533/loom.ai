@@ -3,7 +3,7 @@
     python -m scripts.test_agent_loop "write hello.py that prints hi, then run it"
 
 Prints every event the websocket would have sent, so you can verify the loop
-before touching the frontend. Requires XAI_API_KEY and E2B_API_KEY.
+before touching the frontend. Requires OPENCODE_API_KEY and E2B_API_KEY.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ async def main() -> int:
     missing = [
         name
         for name, present in (
-            ("XAI_API_KEY", settings.xai_api_key),
+            ("OPENCODE_API_KEY", settings.opencode_api_key),
             ("E2B_API_KEY", settings.e2b_api_key),
         )
         if not present

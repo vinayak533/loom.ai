@@ -125,7 +125,21 @@ async def owns_session(user_id: str | None, session_id: str) -> bool:
     is where a new session row is created, so the connect necessarily precedes
     the row.
     """
-    row = await repository.get_session(session_id)
+    return owns_row(user_id, await repository.get_session(session_id))
+
+
+def owns_row(user_id: str | None, row: dict | None) -> bool:
+    """The ownership verdict for a session row already in hand.
+
+    Split out of :func:`owns_session` so a caller that needs the row anyway
+    does not pay for a second read of it. The Chat/Code socket needs exactly
+    that — it reads the row to resolve the session's stored model — and was
+    fetching it twice, two full Supabase round trips (~153 ms each, measured)
+    on every connect.
+
+    A ``None`` row is not a refusal, for the reason given above: the socket is
+    where a new session is created, so the connect precedes the row.
+    """
     if row is None:
         return True
     return _same_owner(row.get("user_id"), user_id)

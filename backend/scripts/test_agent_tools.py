@@ -55,7 +55,7 @@ def ctx(agent_id: str = "document_summarizer") -> ToolContext:
         agent_id=agent_id,
         user_id=None,
         call_id="test-call",
-        model_id="grok-4-5",
+        model_id="qwen3_7_plus",
     )
 
 

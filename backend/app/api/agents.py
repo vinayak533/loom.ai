@@ -18,6 +18,7 @@ from app.api.ownership import require_session
 from app.config import get_settings
 from app.credits import get_balance, grant, recent_ledger, store_status
 from app.db import repository
+from app.llm_router import effective_default_model
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agents")
@@ -75,7 +76,7 @@ async def create_agent_session(
     return await repository.create_session(
         str(uuid.uuid4()),
         user_id,
-        model_id=model_id or settings.default_model_id,
+        model_id=model_id or effective_default_model(),
         agent_id=agent_id,
         title=f"New {registry.get_agent(agent_id).role.lower()} session",
     )
