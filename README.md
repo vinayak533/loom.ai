@@ -69,6 +69,8 @@ animation system is a pure function of these event types:
 | `tool_call_result` | card result expands with a height transition |
 | `file_changed` | file-tree node flashes; diff panel springs open; a live preview schedules a debounced reload |
 | `file_tree` | sidebar tree re-renders |
+| `artifact_created` | the artifact panel opens on the new document |
+| `artifact_updated` | the panel revises in place, and does *not* steal focus |
 | `preview_ready` | Preview tab opens on the running site |
 | `preview_error` | error banner over the frame (`fatal: false`) or the stopped state (`true`) |
 | `preview_stopped` | preview closes; `reason: "absent"` is the connect-time reconcile |
@@ -1006,6 +1008,93 @@ chat reply is not.
 
 ---
 
+## Artifacts
+
+A document the model writes *beside* the conversation rather than into it: a
+file, a page, a component, a draft. The transcript keeps a chip; the content
+lives in its own panel.
+
+The distinction that justifies the whole surface is whether a thing is **worked
+on** or **said once**. A 300-line file pasted into a transcript is unreadable,
+unscrollable, and gone the moment the next message arrives. The same file in a
+panel can be read, edited, and revised across turns.
+
+The Agents section has had this since it was built — a tool result can carry an
+`artifact` payload. What was missing was any way for Chat and Code, the two
+surfaces where people actually write documents, to produce one.
+
+### Deliberate, not heuristic
+
+The model creates an artifact by **calling a tool**. It does not get promoted
+into a panel because a code fence crossed a line count.
+
+A heuristic is wrong in both directions constantly: it promotes a long stack
+trace nobody wants to edit, and it leaves the twelve-line config someone has
+been iterating on for five turns stuck in the transcript. The model knows
+whether it just wrote a *thing* or an *explanation*, and asking costs one
+sentence in a tool description.
+
+### Versions, never overwrites
+
+Every write is a new row. `artifact_key` is the stable identity; `version`
+counts up within it.
+
+That settles the user-edit question, which is the one that decides whether
+people trust the feature. **A person editing an artifact does not overwrite the
+model's version — they add one**, attributed to them in `created_by`. Nothing
+the model wrote is destroyed by someone tidying it up, the history stays
+walkable, and the model sees the edit on its next turn because it reads the
+latest.
+
+The panel says so rather than assuming it is understood: the editor's status
+line reads *"Autosaves to a new version"*, not the "to the sandbox" it says for
+a real file. Both halves of that default would have been wrong — an artifact
+never touches the sandbox, and "save" normally means overwrite.
+
+Viewing an older version is read-only, and says why. Letting someone type into
+a version that cannot be saved and only telling them at save time is worse than
+not accepting the keystrokes.
+
+### Four kinds, and one that is missing
+
+| Kind | Rendered as |
+|---|---|
+| `markdown` | formatted prose |
+| `code` | the CodeMirror editor, highlighted by `language` |
+| `html` | a sandboxed iframe |
+| `svg` | an image |
+
+`mermaid` is deliberately **absent**. There is no mermaid renderer in this
+frontend, so offering it would produce a "diagram" that displays as its own
+source — a plausible-looking capability that does not work, which is the trade
+this codebase refuses elsewhere (see the Deploy button in Project Pulse). Add
+the renderer first, then add the kind.
+
+### Two events, not one with a flag
+
+`artifact_created` opens the panel. `artifact_updated` revises it in place and
+does **not** steal focus. Stealing focus every time the model touches a
+document someone is reading is the fastest way to make a canvas unusable, and
+that difference is worth a type rather than a boolean.
+
+Both carry the full content. The alternative is an id the client then fetches,
+which is a round trip to display something the server already had in hand, on
+the one path where the user is watching and waiting.
+
+### Security notes
+
+**HTML runs with `sandbox="allow-scripts allow-forms allow-popups"` and no
+`allow-same-origin`.** The content is model-written and may contain scripts.
+Those two flags *together* would be equivalent to not sandboxing at all — the
+frame could reach this origin's storage and DOM. Apart, the page can be
+interactive and still cannot touch anything of ours.
+
+**SVG renders through an `<img>` data URL, not as injected markup.** An
+`<svg>` written into the DOM can carry scripts and event handlers; the same
+markup in an `<img>` cannot execute anything.
+
+---
+
 ## Latency
 
 An agent turn is mostly waiting — on the model, on E2B, on Supabase — so the
@@ -1128,6 +1217,7 @@ backend/
       repository.py       sessions, messages, files, token_usage
       learn_repository.py notebooks + course progress and exam attempts
     analysis.py           one shell pass over the sandbox; the narrative; LOOM.md
+    artifacts.py          documents written beside the conversation, versioned
     gitmsg.py             a commit message from a staged diff
     projects.py           a project's instructions + knowledge -> prompt text
     memory.py             per-account instructions, facts, and the learning pass
@@ -1149,12 +1239,15 @@ frontend/
     sections.ts           Chat / Learn / Code identity
     api.ts, learn.ts, supabase.ts
     courses.ts            course API client + the content/state cache split
+    artifacts.ts          artifacts: read, version history, save an edit
     projects.ts           projects, knowledge files, memory
     useProjects.ts        project state, kept out of page.tsx
   components/
     SectionNav  SessionSidebar  SessionListItem  SessionHistoryMenu  AuthPanel
     ChatPanel  ToolCallCard  FileTree  DiffViewer  TerminalPanel
     GitPanel  ProjectPulse  ProjectHealth  PersonalizationGroup
+    artifacts/
+      ArtifactPanel       the document surface: render, edit, version switcher
     projects/
       ProjectStrip        the chips at the head of the sessions flyout
       ProjectPanel        instructions, knowledge files, the sessions inside
@@ -1222,6 +1315,14 @@ frontend/
   conversation but not the sandbox's idle teardown. Regenerating it is one
   click and one model call; persisting it across sandboxes would mean storing
   it on the project row, which is worth doing and is not done yet.
+* **An artifact is not a file.** It lives in the database, not the sandbox, so
+  it cannot be run, imported or served. The tool description says so, but a
+  model that ignores it will produce something the user cannot execute — in a
+  Code session `write_file` is the right tool and an artifact is not.
+* **No mermaid.** There is no renderer for it, so the kind is not offered
+  rather than offered and shown as source.
+* **Artifacts are per session.** They are not shared across a project, and
+  reopening a different conversation does not carry them over.
 * **Git is sandbox-only, permanently.** No remote, no push, no clone. A
   session's history leaves as part of the exported zip or not at all.
 * **Duplicate memories are only caught on an exact match.** A rephrasing of a
