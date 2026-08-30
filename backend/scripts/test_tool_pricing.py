@@ -194,7 +194,7 @@ async def main() -> int:
     agents_graph.repository.fire = lambda *a, **k: None
     try:
         state = {"session_id": "s", "agent_id": "research_fact_checker",
-                 "user_id": "", "model_id": "grok-4-5"}
+                 "user_id": "", "model_id": "qwen3_7_plus"}
         await agents_graph._execute_call(
             state,
             {"id": "1", "name": "read_url",

@@ -236,7 +236,31 @@ _LOCK = asyncio.Lock()
 #: degradation mid-session hands an account with 12 credits left a fresh
 #: opening grant of 1000 — the original fail-open bug in miniature, reached by
 #: a different route.
-_LAST_KNOWN: dict[str, tuple[float, float, float]] = {}
+class _Snapshots(dict):
+    """``_LAST_KNOWN``, with the time each entry was written.
+
+    A plain dict would need the timestamp bolted on at all five assignment
+    sites, and the one that got forgotten would be the one that mattered.
+    Recording it here makes "how old is this number?" answerable wherever the
+    snapshot is, which is what :func:`ensure_can_start` needs to decide whether
+    it may skip its round trip.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.at: dict[str, float] = {}
+
+    def __setitem__(self, key: str, value: tuple[float, float, float]) -> None:
+        super().__setitem__(key, value)
+        self.at[key] = time.monotonic()
+
+    def age(self, key: str) -> float:
+        """Seconds since this account's snapshot was written; ``inf`` if never."""
+        stamped = self.at.get(key)
+        return float("inf") if stamped is None else time.monotonic() - stamped
+
+
+_LAST_KNOWN: _Snapshots = _Snapshots()
 
 
 # ---------------------------------------------------------------------------
@@ -758,14 +782,71 @@ async def ensure_can_start(user_id: str | None, agent_id: str) -> Balance:
     Deliberately a hard stop rather than a warning: the alternative is letting
     a turn run up a bill against an account that has already been told it is
     empty, which is the failure the meter exists to prevent.
+
+    **Why this is allowed to answer from memory.** This await sat between the
+    user pressing Enter and the first byte reaching a provider, and it is one
+    Supabase round trip — measured at 151 ms warm, 1.3 s cold — paid on every
+    single turn. So a *recent* snapshot is used instead, on two conditions
+    that between them keep the gate honest:
+
+      · every debit this process makes updates the snapshot as it writes, so
+        the number is not merely cached, it is maintained. Spending is what
+        moves a balance, and spending goes through :func:`_debit`.
+      · the shortcut only applies while the balance is clear of the floor by
+        more than one turn's ceiling. An account anywhere near empty — the
+        only case where being wrong costs anything — always takes the real
+        read.
+
+    What remains is an account topped up in another process not being seen for
+    up to ``credit_gate_cache_seconds``, which errs towards refusing a turn the
+    user could afford rather than granting one they could not, and resolves
+    itself on the next tick.
     """
     settings = get_settings()
+    if settings.credits_enabled:
+        cached = _gate_shortcut(user_id)
+        if cached is not None:
+            return cached
     balance = await get_balance(user_id)
     if not settings.credits_enabled:
         return balance
     if balance.balance < settings.credit_minimum_to_start:
         raise InsufficientCredits(balance.balance, settings.credit_minimum_to_start)
     return balance
+
+
+def _gate_shortcut(user_id: str | None) -> Balance | None:
+    """A snapshot fresh and comfortable enough to open a turn on. Else None."""
+    settings = get_settings()
+    ttl = settings.credit_gate_cache_seconds
+    if ttl <= 0:
+        return None
+    account = _account_id(user_id)
+    if _DEGRADED_SINCE is not None or account not in _LAST_KNOWN:
+        return None
+    if _LAST_KNOWN.age(account) > ttl:
+        return None
+    balance, granted, spent = _LAST_KNOWN[account]
+    # One whole turn's worth of headroom above the floor. Below that, the
+    # difference between the snapshot and the truth could be the difference
+    # between a turn that is affordable and one that is not.
+    floor = settings.credit_minimum_to_start + max(settings.credit_turn_ceiling, 0.0)
+    if balance < floor:
+        return None
+    return Balance(account, balance, granted, spent)
+
+
+async def prime_balance(user_id: str | None) -> None:
+    """Warm the snapshot off the critical path. Never raises.
+
+    Called when a socket connects, which is dead time the user is not waiting
+    on, so the first turn of the session finds :func:`_gate_shortcut` already
+    populated instead of paying the round trip at the worst possible moment.
+    """
+    try:
+        await get_balance(user_id)
+    except Exception:  # noqa: BLE001 - a cold cache is not a failure
+        log.debug("Balance prime skipped", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

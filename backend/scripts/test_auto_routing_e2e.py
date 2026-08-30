@@ -181,10 +181,10 @@ async def main() -> int:
             session_id,
             "In one word, what colour did I just show you?",
             emitter,
-            model_id="grok-4-5",
+            model_id="gpt-oss-120b",
         )
         check("routing_mode is manual", final.get("routing_mode") == "manual")
-        check("model is the manual pick", final.get("model_id") == "grok-4-5")
+        check("model is the manual pick", final.get("model_id") == "gpt-oss-120b")
         check("hint cleared in manual mode", not final.get("routing_hint"))
         check(
             "checkpoint history intact and growing",

@@ -13,9 +13,11 @@ import logging
 from app.agent.prompts import PROJECT_META_PROMPT, TITLE_PROMPT
 from app.config import get_settings
 from app.llm_router import (  # noqa: F401  (re-exported for existing imports)
+    EMPTY_TURN_TEXT,
     ModelCallError,
     ModelUnavailableError,
     call_model,
+    complete_with_fallback,
     estimate_cost,
     is_available,
 )
@@ -29,7 +31,7 @@ log = logging.getLogger(__name__)
 #: Deliberately no OpenCode models here. They are reasoning models that spend
 #: output budget thinking before they emit any text, so a 32-token call to one
 #: comes back empty — see the note on ``OpenCodeAdapter``.
-TITLE_MODELS = ("llama-70b", "llama-4-scout", "nemotron-3")
+TITLE_MODELS = ("gpt-oss-120b", "llama-4-scout", "nemotron-3")
 
 
 def _title_model() -> str:
@@ -49,13 +51,17 @@ async def generate_title(first_message: str) -> str | None:
     """
     model_id = _title_model()
 
+    # Fallback applies here too. A session whose title generation hits Groq's
+    # per-minute cap is not worth leaving unnamed when another cheap model is
+    # sitting right there — and this is the call most likely to hit that cap,
+    # since it fires on the first message of every new session.
     try:
-        message = await call_model(
+        message, _ = await complete_with_fallback(
             model_id,
             messages=[{"role": "user", "content": TITLE_PROMPT + first_message[:1000]}],
             tools=[],
-            stream=False,
             max_tokens=32,
+            section="title",
         )
     except (ModelUnavailableError, ModelCallError):
         return None
@@ -64,6 +70,22 @@ async def generate_title(first_message: str) -> str | None:
         return None
 
     title = _text_of(message).strip().strip('"')
+
+    # A turn that produced no text comes back as the router's placeholder
+    # sentence rather than as an empty string — there has to be *something* in
+    # an assistant message or the next request rejects the history. That is
+    # right for the transcript and completely wrong here: it was being stored
+    # verbatim as the session's name, so the shelf filled up with rows called
+    # "(The model ended its turn without producing an answer. This usually
+    # means it spe". No name at all is better; the session keeps its default
+    # and the next turn is free to try again.
+    #
+    # Guarded here rather than at the model choice because `TITLE_MODELS`
+    # cannot promise it: `complete_with_fallback` may route past all three into
+    # a reasoning model, which is exactly the case that returns nothing from a
+    # 32-token budget.
+    if not title or title.startswith(EMPTY_TURN_TEXT[:40]):
+        return None
     return title[:80] or None
 
 
@@ -81,14 +103,14 @@ async def generate_project_meta(transcript: str) -> dict | None:
     model_id = _title_model()
 
     try:
-        message = await call_model(
+        message, _ = await complete_with_fallback(
             model_id,
             messages=[
                 {"role": "user", "content": PROJECT_META_PROMPT + transcript[:14000]}
             ],
             tools=[],
-            stream=False,
             max_tokens=160,
+            section="project_meta",
         )
     except (ModelUnavailableError, ModelCallError):
         return None

@@ -190,7 +190,7 @@ async def charge(amount_usd: float, reason: str = "test call") -> float:
     """One LLM debit, in the same shape the graph issues them."""
     return await credits.charge_llm(
         None, session_id="s1", agent_id="research_fact_checker",
-        model_id="grok-4-5", cost_usd=amount_usd,
+        model_id="qwen3_7_plus", cost_usd=amount_usd,
     )
 
 

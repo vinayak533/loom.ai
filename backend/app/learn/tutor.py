@@ -1,8 +1,9 @@
 """The two model calls the Learn section makes.
 
-Both go through :func:`app.llm_router.call_model` — the router is untouched,
-this module only decides what to put in front of it. The rule both prompts
-share: the notebook's sources are the only permitted evidence. A tutor that
+Both go through :func:`app.llm_router.complete_with_fallback` — the router is
+untouched, this module only decides what to put in front of it, and gets
+automatic model fallback on a provider-side failure for free. The rule both
+prompts share: the notebook's sources are the only permitted evidence. A tutor that
 quietly answers from general knowledge is worse than one that says the sources
 do not cover it, because the user cannot tell the two apart.
 """
@@ -21,7 +22,7 @@ from app.credits import charge_llm
 from app.llm_router import (
     ModelCallError,
     ModelUnavailableError,
-    call_model,
+    complete_with_fallback,
     estimate_cost,
     is_available,
 )
@@ -77,7 +78,7 @@ a fair question may use an empty `quiz` array.
 #: Preference order for Learn's model when the caller does not name one.
 #: Notebook answering is a reading-comprehension task over supplied text, so a
 #: strong general model is worth more here than a fast one.
-LEARN_MODELS = ("grok-4-5", "nemotron-3", "llama-4-scout", "llama-70b")
+LEARN_MODELS = ("mimo_v2_5", "nemotron-3", "qwen3_7_plus", "llama-4-scout")
 
 
 def default_model() -> str:
@@ -136,13 +137,17 @@ async def answer(
         {"role": "user", "content": f"{as_prompt(passages)}\n\nQuestion: {question}"}
     )
 
-    message = await call_model(
+    # `resolved` is rebound to whatever answered: on a provider-side failure
+    # the router retries another model, and both the credit debit and the
+    # `model_id` returned to the client have to name that one, not the model
+    # that errored before producing a single token.
+    message, resolved = await complete_with_fallback(
         resolved,
         messages=messages,
         tools=[],
         system=ANSWER_SYSTEM,
-        stream=False,
         max_tokens=2000,
+        section="learn",
     )
 
     usage = getattr(message, "usage", {}) or {}
@@ -197,7 +202,7 @@ async def outline(passages: list[Passage], title: str, model_id: str | None = No
     half-parsed curriculum.
     """
     resolved = resolve_model(model_id)
-    message = await call_model(
+    message, resolved = await complete_with_fallback(
         resolved,
         messages=[
             {
@@ -210,7 +215,6 @@ async def outline(passages: list[Passage], title: str, model_id: str | None = No
         ],
         tools=[],
         system=OUTLINE_SYSTEM,
-        stream=False,
         # No cap of our own. A course is the longest single generation in the
         # app — six sections of prose plus their quizzes — and on a thinking
         # model the reasoning is drawn from the same budget. Capping it below
@@ -218,6 +222,7 @@ async def outline(passages: list[Passage], title: str, model_id: str | None = No
         # as "the model did not return valid JSON" for a model that was in
         # fact answering correctly.
         max_tokens=None,
+        section="learn_course",
     )
 
     text = _text_of(message)

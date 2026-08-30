@@ -15,7 +15,7 @@ aiosqlite>=0.20.0
 # --- LLMs ---
 # The OpenAI *client library* only — no OpenAI model is used or reachable.
 # It is the HTTP/SSE client for every provider that speaks the
-# OpenAI-compatible wire format: xAI, OpenRouter, Groq, OpenCode.
+# OpenAI-compatible wire format: OpenRouter, Groq, OpenCode.
 openai>=1.55.0
 
 # --- Tools ---

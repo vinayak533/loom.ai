@@ -39,7 +39,7 @@ from app.llm_router import (  # noqa: E402
 
 #: The one that failed in the wild, plus the rest of the Auto pool — they are
 #: the models a real session is routed between without being asked.
-MODELS = ["deepseek_v4_flash", "minimax_m2_7", "mimo_v2_5", "qwen3_7_plus"]
+MODELS = ["deepseek_v4_flash", "minimax_m3", "mimo_v2_5", "qwen3_7_plus"]
 
 #: A conversation that only makes sense if turn one is actually present.
 TURN_ONE = "Pick a number between 1 and 100 and say only that number."
@@ -128,7 +128,7 @@ async def main() -> int:
     results = [await check(mid) for mid in MODELS]
 
     print("\nSwitching provider mid-conversation (what Auto does)\n")
-    results.append(await check_crossover("deepseek_v4_flash", "grok-4-5"))
+    results.append(await check_crossover("deepseek_v4_flash", "gpt-oss-120b"))
     results.append(await check_crossover("deepseek_v4_flash", "llama-4-scout"))
 
     failed = results.count(False)

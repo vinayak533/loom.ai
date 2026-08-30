@@ -30,24 +30,41 @@ class Settings(BaseSettings):
     openrouter_max_tokens: int = 8000
 
     # Groq (OpenAI-compatible, direct API)
+    #
+    # `llama-3.3-70b-versatile` was retired: Groq's live /models list no longer
+    # includes any llama-3.x chat model, and calling it returns HTTP 404
+    # `model_not_found`, which surfaced as a failed title generation on every
+    # first message. `openai/gpt-oss-120b` is the largest general chat model
+    # Groq currently serves and was verified against the live API for both
+    # plain completion and tool calling before being put here.
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_model_a: str = "llama-3.3-70b-versatile"
-    groq_max_tokens: int = 8000
-
-    # xAI (Grok, direct API — NOT via OpenRouter). This is now the primary
-    # provider: Grok 4.5 is the default model for every section.
+    groq_model_a: str = "openai/gpt-oss-120b"
+    # 4000, not 8000, and the difference is the whole reason Groq worked at all
+    # here. Groq's free `on_demand` tier caps at 8000 *tokens per minute*, and
+    # it counts `max_tokens` toward that budget rather than the tokens actually
+    # produced. At 8000 the budget was exhausted by the request's own ceiling
+    # before a single prompt token was counted, so every call — even "say
+    # PONG" — came back:
     #
-    # `grok-4.5` is the id xAI's own model docs publish (aliases: grok-4.5-latest,
-    # grok-build-latest). 500k context, tool calling and image input both
-    # supported, structured outputs supported. Do not "tidy" this string into
-    # `grok-4-5` — the registry *key* uses dashes, the wire id uses a dot.
-    xai_api_key: str = ""
-    xai_base_url: str = "https://api.x.ai/v1"
-    xai_model_grok_45: str = "grok-4.5"
-    # Raised from the old 8000: Grok 4.5 is now the agent's main driver and a
-    # tool loop needs headroom to write a real answer after its calls.
-    xai_max_tokens: int = 16000
+    #   413 rate_limit_exceeded: Request too large ... on tokens per minute
+    #   (TPM): Limit 8000, Requested 8074
+    #
+    # 4000 leaves 4000 tokens of prompt headroom under the same cap. A paid
+    # tier lifts the limit and this can go back up; gpt-oss-120b itself allows
+    # 65,536 completion tokens, so nothing about the model constrains it.
+    groq_max_tokens: int = 4000
+
+    # The providers above and below are the whole list. A removed provider's
+    # variables left over in a deployment's .env are ignored rather than
+    # rejected (`extra="ignore"` above), so they are harmless and can simply be
+    # deleted.
+    #
+    # Note that the model slugs below are the *only* thing deciding which model
+    # each registry entry serves, which is why a slug alone is not trusted:
+    # `llm_router.BANNED_MODEL_SUBSTRINGS` refuses a set of vendors outright,
+    # whatever entry they are configured under. Read that note before assuming
+    # an .env change is enough to switch a slot to any model you like.
 
     # OpenCode Go (OpenAI-compatible gateway — verified against the live API,
     # see OpenCodeAdapter). The Go plan's base URL differs from Zen's
@@ -55,21 +72,76 @@ class Settings(BaseSettings):
     opencode_api_key: str = ""
     opencode_base_url: str = "https://opencode.ai/zen/go/v1"
     opencode_model_fast: str = "deepseek-v4-flash"
-    opencode_model_edit: str = "minimax-m2.7"
+    # `minimax-m2.7` used to be here and had to go: it is still on OpenCode
+    # Go's /models list and it answers HTTP 500 to *everything* — probed 9/9
+    # failures, including "reply with exactly PONG" with no tools attached, so
+    # it is the model and not this project's request shape. It is Auto's
+    # `code_editing` target, which made every auto-routed code edit open with a
+    # guaranteed failed call. `minimax-m3` is the same family, live, and
+    # verified here for streaming and tool calling against the real coding
+    # toolset. (`minimax-m2.5` also works if a more conservative step back from
+    # 2.7 is ever wanted.)
+    opencode_model_edit: str = "minimax-m3"
     opencode_model_visual: str = "qwen3.7-plus"
     opencode_model_complex: str = "mimo-v2.5"
+    # A *different model* from the one above, not a newer label for it. Both
+    # ids are on OpenCode Go's live /models list and they differ in a way that
+    # matters: `mimo-v2.5` reads images, `mimo-v2.5-pro` rejects them.
+    opencode_model_complex_pro: str = "mimo-v2.5-pro"
     opencode_max_tokens: int = 8000
 
     # Which model_id a new session starts with unless the user picks otherwise.
-    default_model_id: str = "grok-4-5"
+    #
+    # `qwen3_7_plus` is the roster-wide pick because it is the only model that
+    # is *verified against the live API* for both halves of what a default has
+    # to do: real tool calling, and actually reading an attached image. It
+    # remains the answer for any surface that does not name its own default
+    # below, and the stand-in whenever a section's own pick has no key.
+    default_model_id: str = "qwen3_7_plus"
+
+    # --- Per-section defaults ---------------------------------------------
+    # A new session opens on the default for *the section that created it*,
+    # not on one number for the whole product. The sections do genuinely
+    # different work and the right opening model differs accordingly:
+    #
+    #   code      MiMo V2.5 — long-horizon coding is its stated speciality,
+    #             and it reads images, so a screenshot pasted into a Code
+    #             session still lands. Verified end to end on the "build me a
+    #             page and serve it" flow.
+    #   chat      DeepSeek V4 Flash — the cheapest and fastest entry in the
+    #             pool, which is what a conversational surface should open on.
+    #             Text only; an attachment degrades to a note, and Auto still
+    #             reroutes a turn carrying an image to a model that can see.
+    #   learning  MiMo V2.5, matching `learn.tutor.LEARN_MODELS`, which had
+    #             already chosen it independently.
+    #   agents    left on the roster default: the ten specialists span every
+    #             kind of work and one section-wide pick would be wrong for
+    #             most of them.
+    #
+    # Each is only a *preference*. `llm_router.section_default_model()` runs
+    # every one of these through `first_available()`, so a section whose pick
+    # has no configured key opens on something that works instead of on a dead
+    # first message.
+    default_model_chat: str = "deepseek_v4_flash"
+    default_model_code: str = "mimo_v2_5"
+    default_model_learning: str = "mimo_v2_5"
+    default_model_agents: str = ""
 
     # --- Auto router ------------------------------------------------------
     # Auto mode classifies the live turn (see app.agent.task_classifier) and
     # maps the resulting hint onto an OpenCode model. When OpenCode is not
     # configured it degrades to the older section-based table below.
-    auto_route_chat: str = "grok-4-5"
-    auto_route_learning: str = "nemotron-3"
-    auto_route_code: str = "llama-4-scout"
+    #
+    # These now mirror the per-section defaults above rather than pointing at
+    # three unrelated models. The table is the *degraded* path — it is what
+    # Auto resolves to when there is no task-routing pool — and answering with
+    # something other than the section's own default there is a difference the
+    # user cannot see the reason for. `auto_route_code` in particular pointed
+    # at `llama-4-scout`, an OpenRouter entry, which put the Code section's
+    # degraded route on a different provider from everything else it does.
+    auto_route_chat: str = "deepseek_v4_flash"
+    auto_route_learning: str = "mimo_v2_5"
+    auto_route_code: str = "mimo_v2_5"
 
     # --- Auto router thresholds -------------------------------------------
     # Every tunable the classifier reads lives here, so its rules can be
@@ -158,6 +230,13 @@ class Settings(BaseSettings):
     # budget — the turn gets one final, tool-free call to write up what it has
     # rather than being severed mid-thought.
     credit_turn_ceiling: float = 150.0
+    # How long the balance the turn-opening gate reads may be, before it goes
+    # back to the database. The gate is the one credit call sitting directly
+    # between Enter and the model, and it cost a full Supabase round trip
+    # (151 ms warm) on every turn. See `credits.ensure_can_start` for why a
+    # snapshot is safe here and where it deliberately is not used. Set to 0 to
+    # read through on every turn.
+    credit_gate_cache_seconds: float = 20.0
 
     # --- Supabase ---------------------------------------------------------
     supabase_url: str = ""
@@ -182,10 +261,6 @@ class Settings(BaseSettings):
     @property
     def supabase_enabled(self) -> bool:
         return bool(self.supabase_url and self.supabase_service_role_key)
-
-    @property
-    def xai_enabled(self) -> bool:
-        return bool(self.xai_api_key)
 
     @property
     def openrouter_enabled(self) -> bool:
@@ -232,12 +307,27 @@ class Settings(BaseSettings):
             "code": self.auto_route_code,
         }
 
+    @property
+    def section_defaults(self) -> dict[str, str]:
+        """Configured opening model per section. Preferences, not promises.
+
+        An empty string means "no opinion, use `default_model_id`". Resolving
+        these to something runnable is `llm_router.section_default_model()`'s
+        job, not this property's — settings state intent, the router states
+        what will actually happen.
+        """
+        return {
+            "chat": self.default_model_chat,
+            "code": self.default_model_code,
+            "learning": self.default_model_learning,
+            "agents": self.default_model_agents,
+        }
+
     def public_summary(self) -> dict:
         """Booleans only. Safe to return over HTTP — never the values."""
         return {
             "openrouter": self.openrouter_enabled,
             "groq": self.groq_enabled,
-            "xai": self.xai_enabled,
             "opencode": self.opencode_enabled,
             "e2b": bool(self.e2b_api_key),
             "exa": bool(self.exa_api_key),
@@ -252,11 +342,19 @@ class Settings(BaseSettings):
             "resend": self.resend_enabled,
             "credits_enabled": self.credits_enabled,
             "default_model_id": self.default_model_id,
+            # Per-section opening models. The client needs the whole map, not
+            # just its own section's entry: it holds one selection per section
+            # and restores all four before the user has picked a surface.
+            "default_model_ids": self.section_defaults,
             "auto_routes": self.auto_routes,
             # True once OpenCode is configured: Auto classifies each turn
             # instead of using the section table above.
             "auto_task_routing": self.opencode_enabled,
             "max_iterations": self.max_agent_iterations,
+            # Not a secret, and the client cannot behave correctly without it:
+            # it decides whether signing out leaves a way back into the app
+            # without an account, or a wall.
+            "require_auth": self.require_auth,
         }
 
 

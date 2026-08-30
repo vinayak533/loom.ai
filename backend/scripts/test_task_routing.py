@@ -87,7 +87,7 @@ CASES: list[tuple[str, dict, str, str]] = [
             "iterations": 2,
         },
         "code_editing",
-        "minimax_m2_7",
+        "minimax_m3",
     ),
     (
         "iterative edit thread (recent edit in history)",
@@ -100,7 +100,7 @@ CASES: list[tuple[str, dict, str, str]] = [
             "iterations": 3,
         },
         "code_editing",
-        "minimax_m2_7",
+        "minimax_m3",
     ),
     (
         "image attached",
@@ -199,7 +199,7 @@ async def check_usage_rows() -> int:
             routing_hint="visual_structural",
         )
         await repository.record_usage(
-            "sess-1", "grok-4.5", 80, 20, 0.0009, model_id="grok-4-5"
+            "sess-1", "openai/gpt-oss-120b", 80, 20, 0.0009, model_id="gpt-oss-120b"
         )
     finally:
         repository.enabled, repository.get_client = real_enabled, real_client
