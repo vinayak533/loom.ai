@@ -915,6 +915,97 @@ steer another's answers.
 
 ---
 
+## Reading a codebase
+
+Two halves that cost very different things, so they are two functions, two
+endpoints, and two visibly separate things in the UI.
+
+`analysis.scan()` is **pure measurement**: languages, lines, entry points,
+dependencies, a TODO census, whether tests and linting exist. No model call,
+nothing charged, and the same tree always produces the same numbers. That is
+what makes it something the panel can refresh whenever a file changes.
+
+`analysis.summarise()` is **the narrative** — one model call that turns those
+numbers into prose about what the project is. Charged like every other call,
+and always asked for.
+
+### One shell command, not a tree walk
+
+The obvious implementation walks the tree through `sandbox.files.list`, which
+is what the file sidebar does. For a real repository that is hundreds of round
+trips over the E2B transport, and the sidebar's walker is depth-limited to 3
+and budget-capped precisely because of it — it is built to draw a sidebar, not
+to count a codebase. `scan` sends one script and parses its output: one round
+trip, no depth limit, and `find | xargs wc -l` does the counting where the
+files actually are. A ten-file sandbox measures in ~250 ms.
+
+**A language's size is its lines, not its file count.** A project with one
+4,000-line module and forty 20-line configs is a project in that first
+language, and a file-count histogram says the opposite. The bar in the panel
+is sized the same way.
+
+### Neither half may create a sandbox
+
+Both `scan` and `read_loom_file` probe `sandbox_manager.sandbox_id_for()` and
+return empty when it is None. Without that guard:
+
+* the health panel calls `scan` on mount, so **opening the Code tab** would
+  cold-start an E2B sandbox, burn a slot and start the 15-minute idle clock for
+  a session where nothing had been asked for;
+* `read_loom_file` runs on the prompt path of *every* turn, so **every Chat
+  message** would pay a cold create to read a file that cannot exist there.
+
+Both were real, and the second is the more expensive mistake of the two.
+
+### LOOM.md
+
+`write_file: true` on the analysis endpoint stores the narrative as `LOOM.md`
+at the sandbox root, and `preamble.compose` reads it back into the system
+prompt on every later turn of that session. That is what makes an analysis
+outlive the conversation that asked for it.
+
+It is injected **last and labelled as reference**, not as instruction. It
+describes what the code is; a description of a Rails app must not read as an
+instruction to write Rails. Edit it by hand freely — nothing rewrites it except
+an explicit regenerate.
+
+---
+
+## Version control
+
+Still sandbox-only. There is no remote, no credential, and no network path out
+of `tools/git.py` — the module's opening note is unchanged and is a guarantee,
+not a description of what has been built so far.
+
+What the panel does now:
+
+| | |
+|---|---|
+| **Staging** | Per-file checkboxes. An empty selection means *commit everything*, so the common case did not get worse to buy the rare one. |
+| **Branches** | List, create, switch, merge. Merging is the secondary action on a row that is not the current branch, because merging *into* the branch you are looking at is what the word means. |
+| **Discard** | The one operation nothing can undo — an untracked file removed here was never in the object store. It confirms, inline. |
+| **Commit messages** | A cheap model writes one from the staged diff, into the box. Never applied. |
+
+Two decisions worth stating.
+
+**`commit(use_index=True)` exists because the checkboxes would otherwise be
+decorative.** The old path always ran `git add -A` before committing, which
+sweeps unticked files straight back in. The panel stages its selection, then
+commits the index and nothing else.
+
+**A merge conflict is a 200, not an error.** The merge really happened and the
+working tree really does have markers in it; reporting a failure would leave
+the caller looking at a repository whose state nobody told them about.
+`conflicted` names the files, and both the UI and the agent's tool report it as
+a result with a problem in it rather than as a call that did not happen.
+
+**The commit message is suggested, never applied.** The user still presses
+commit, because that press is the only moment anyone reads what is about to be
+recorded permanently — and a wrong commit message is permanent in a way a wrong
+chat reply is not.
+
+---
+
 ## Latency
 
 An agent turn is mostly waiting — on the model, on E2B, on Supabase — so the
@@ -1036,6 +1127,8 @@ backend/
     db/
       repository.py       sessions, messages, files, token_usage
       learn_repository.py notebooks + course progress and exam attempts
+    analysis.py           one shell pass over the sandbox; the narrative; LOOM.md
+    gitmsg.py             a commit message from a staged diff
     projects.py           a project's instructions + knowledge -> prompt text
     memory.py             per-account instructions, facts, and the learning pass
     preamble.py           composes base + memory + project, in that order
@@ -1061,6 +1154,10 @@ frontend/
   components/
     SectionNav  SessionSidebar  SessionListItem  SessionHistoryMenu  AuthPanel
     ChatPanel  ToolCallCard  FileTree  DiffViewer  TerminalPanel
+    GitPanel  ProjectPulse  ProjectHealth  PersonalizationGroup
+    projects/
+      ProjectStrip        the chips at the head of the sessions flyout
+      ProjectPanel        instructions, knowledge files, the sessions inside
     FileUploadZone  StatusIndicator  Markdown
     learn/
       LearnSection        the Courses <-> Notebooks switch
@@ -1116,6 +1213,17 @@ frontend/
   drop the same files. Learn's notebooks do the retrieval version of this
   (pgvector, `learn/retrieval.py`); a project deliberately does not, because
   standing background is not the same shape of problem as a question.
+* **The scan measures; it does not read source.** Languages, sizes, manifests
+  and TODO counts come from `find` and `wc`, so the narrative built on them
+  reasons about shape rather than about what the code does. It hedges where the
+  numbers do not settle something, which is the honest behaviour, but it is not
+  a substitute for reading the files.
+* **LOOM.md lives in the sandbox, which is ephemeral.** It survives the
+  conversation but not the sandbox's idle teardown. Regenerating it is one
+  click and one model call; persisting it across sandboxes would mean storing
+  it on the project row, which is worth doing and is not done yet.
+* **Git is sandbox-only, permanently.** No remote, no push, no clone. A
+  session's history leaves as part of the exported zip or not at all.
 * **Duplicate memories are only caught on an exact match.** A rephrasing of a
   fact already known is stored again. Near-duplicate detection needs
   embeddings, and the failure mode of a slightly redundant list is much better
