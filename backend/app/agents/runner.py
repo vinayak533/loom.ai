@@ -123,8 +123,13 @@ async def run_turn(
     file_ids: list[str] | None = None,
     model_id: str | None = None,
     user_id: str | None = None,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Append a user message and run this specialist until it stops."""
+    """Append a user message and run this specialist until it stops.
+
+    ``project_id`` comes from the session row on every turn rather than from
+    prior state, so moving a session into a project takes effect immediately.
+    """
     graph = get_graph()
     get_agent(agent_id)  # raises UnknownAgent before anything is charged
     settings = get_settings()
@@ -150,6 +155,7 @@ async def run_turn(
         # thread belongs to is decided when it is created and never changes.
         "agent_id": agent_id,
         "user_id": user_id or "",
+        "project_id": project_id or "",
         "model_id": effective,
         "routing_mode": routing_mode,
         "routing_hint": "" if routing_mode == "manual" else prior.get("routing_hint", ""),

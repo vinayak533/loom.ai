@@ -14,6 +14,14 @@ class AgentState(TypedDict, total=False):
     # written before this field existed resumes without a KeyError.
     section: str
 
+    # Which project this session belongs to, or "" for none — which is the
+    # normal case. Carried in state for the same reason `user_id` is: the graph
+    # is resumed from a checkpoint on every turn, and the socket that knew the
+    # session row is not in scope inside a node. Defaults to "" on every read,
+    # so a checkpoint written before projects existed resumes without a
+    # KeyError, exactly as `section` does above.
+    project_id: str
+
     # Which model powers this session (see app.llm_router.MODEL_REGISTRY).
     # Carried in state so a mid-conversation switch survives checkpointing.
     # In auto mode this holds the model the *last* turn resolved to, so the

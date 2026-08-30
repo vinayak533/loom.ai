@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -12,12 +13,17 @@ from app import events as ev
 from app.agent import runner
 from app.agent.llm import generate_project_meta
 from app.api.auth import bearer_user
-from app.api.ownership import require_session, require_session_write
+from app.api.ownership import (
+    require_project,
+    require_project_file,
+    require_session,
+    require_session_write,
+)
 from app.api.ratelimit import RateLimiter
 from app.config import get_settings
 from app.db import repository
 from app.emitter import registry as emitter_registry
-from app.files import UploadRejected, save_upload
+from app.files import MAX_UPLOAD_BYTES, PDF_TYPE, UploadRejected, save_upload
 from app.llm_router import (
     AUTO_MODEL_ID,
     MODEL_REGISTRY,
@@ -30,6 +36,8 @@ from app.llm_router import (
     section_default_model,
     section_default_models,
 )
+from app import memory
+from app.learn import ingest
 from app.sources import ingest_youtube, is_youtube_url
 from app.tools import git, workspace
 from app.tools.preview import preview_manager
@@ -813,12 +821,24 @@ async def get_preferences(user_id: str | None = Depends(bearer_user)):
     another's.
     """
     if not user_id:
-        return {"user_id": None, "default_model_id": None, "theme": "dark"}
+        return {
+            "user_id": None,
+            "default_model_id": None,
+            "theme": "dark",
+            "about_you": "",
+            "response_style": "",
+            "memory_enabled": False,
+        }
     prefs = await repository.get_preferences(user_id)
     return {
         "user_id": user_id,
         "default_model_id": prefs.get("default_model_id"),
         "theme": prefs.get("theme") or "dark",
+        # "" rather than null: these are textarea values, and the client would
+        # otherwise have to coalesce every one of them before binding.
+        "about_you": prefs.get("about_you") or "",
+        "response_style": prefs.get("response_style") or "",
+        "memory_enabled": bool(prefs.get("memory_enabled", True)),
     }
 
 
@@ -860,11 +880,324 @@ async def put_preferences(
                 "This build is dark-only; `theme` must be 'dark'.",
             )
 
+    # The two custom-instruction boxes. Capped at the same number
+    # `memory.MAX_INSTRUCTION_CHARS` clips to when injecting, so the limit is
+    # enforced where the user can see it fail rather than silently truncating
+    # into a prompt later.
+    for field in ("about_you", "response_style"):
+        value = payload.get(field)
+        if value is not None and len(str(value)) > memory.MAX_INSTRUCTION_CHARS:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"`{field}` is at most {memory.MAX_INSTRUCTION_CHARS} characters.",
+            )
+
+    memory_enabled = payload.get("memory_enabled")
+    if memory_enabled is not None:
+        memory_enabled = bool(memory_enabled)
+
     saved = await repository.set_preferences(
-        user_id, default_model_id=model_id, theme=theme
+        user_id,
+        default_model_id=model_id,
+        theme=theme,
+        about_you=payload.get("about_you"),
+        response_style=payload.get("response_style"),
+        memory_enabled=memory_enabled,
     )
     return {
         "user_id": user_id,
         "default_model_id": saved.get("default_model_id"),
         "theme": saved.get("theme") or "dark",
+        "about_you": saved.get("about_you") or "",
+        "response_style": saved.get("response_style") or "",
+        "memory_enabled": bool(saved.get("memory_enabled", True)),
     }
+
+
+# --- projects --------------------------------------------------------------
+#
+# Every route keyed by a project id passes through `require_project` first.
+# That is not belt-and-braces: this service holds the service-role key, so RLS
+# does not apply to anything it does and these guards are the only thing
+# standing between a guessed uuid and another account's project.
+
+
+@router.get("/projects")
+async def list_projects(
+    user_id: str | None = Depends(bearer_user),
+    archived: bool = False,
+):
+    """This account's projects, most recently touched first."""
+    return await repository.list_projects(user_id, archived=archived)
+
+
+@router.post("/projects", status_code=status.HTTP_201_CREATED)
+async def create_project(
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Create a project.
+
+    A name is optional — a project created from the "new project" button has
+    nothing in it yet and naming it before there is anything to name is busy
+    work. It gets the column default and can be renamed later.
+    """
+    payload = payload or {}
+    name = str(payload.get("name") or "").strip()
+    if len(name) > 120:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "A project name is at most 120 characters."
+        )
+    row = await repository.create_project(
+        user_id,
+        name=name or "New project",
+        description=payload.get("description"),
+        instructions=payload.get("instructions"),
+        color=str(payload.get("color") or "slate"),
+        icon=payload.get("icon"),
+    )
+    if not row:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Projects need Supabase configured to persist.",
+        )
+    return row
+
+
+@router.get("/projects/{project_id}")
+async def get_project(project_id: str, user_id: str | None = Depends(bearer_user)):
+    """One project, with its knowledge files and the sessions inside it."""
+    project = await require_project(user_id, project_id)
+    files = await repository.list_project_files(project_id)
+    sessions = await repository.list_sessions(
+        user_id, project_id=project_id, project_scoped=True, limit=200
+    )
+    return {**project, "files": files, "sessions": sessions}
+
+
+@router.patch("/projects/{project_id}")
+async def patch_project(
+    project_id: str,
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Rename, re-describe, re-instruct or archive a project."""
+    await require_project(user_id, project_id)
+    payload = payload or {}
+    name = payload.get("name")
+    if name is not None and not str(name).strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A project needs a name.")
+    row = await repository.set_project(
+        project_id,
+        name=(str(name).strip() if name is not None else None),
+        description=payload.get("description"),
+        instructions=payload.get("instructions"),
+        color=payload.get("color"),
+        icon=payload.get("icon"),
+        is_archived=payload.get("is_archived"),
+    )
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
+    return row
+
+
+@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project(project_id: str, user_id: str | None = Depends(bearer_user)):
+    """Delete a project. The sessions inside it survive and become unfiled.
+
+    That is the behaviour the FK enforces (`on delete set null`) and it is
+    deliberate: deleting a folder is not a request to delete what was in it.
+    """
+    await require_project(user_id, project_id)
+    await repository.delete_project(project_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/sessions/{session_id}/project")
+async def set_session_project(
+    session_id: str,
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Move a session into a project, or out of one with a null `project_id`.
+
+    Both the session and the destination project are checked, because this is
+    the one route that can associate two resources — verifying only the session
+    would let a caller file their own conversation into somebody else's project.
+    """
+    await require_session_write(user_id, session_id)
+    project_id = (payload or {}).get("project_id")
+    if project_id:
+        await require_project(user_id, str(project_id))
+    await repository.set_session_project(session_id, str(project_id) if project_id else None)
+    return {"session_id": session_id, "project_id": project_id or None}
+
+
+# --- project knowledge files -----------------------------------------------
+
+
+@router.get("/projects/{project_id}/files")
+async def list_project_files(
+    project_id: str, user_id: str | None = Depends(bearer_user)
+):
+    """The project's knowledge files, without their text.
+
+    Content is deliberately omitted: a listing renders names and sizes, and a
+    project holding a few large documents would otherwise ship hundreds of
+    kilobytes to draw a list.
+    """
+    await require_project(user_id, project_id)
+    return await repository.list_project_files(project_id)
+
+
+@router.post("/projects/{project_id}/files", status_code=status.HTTP_201_CREATED)
+async def add_project_file(
+    project_id: str,
+    file: UploadFile = File(...),
+    user_id: str | None = Depends(bearer_user),
+):
+    """Attach one PDF or text file as project knowledge.
+
+    Storage and extraction both reuse what already exists rather than growing a
+    second pipeline: `files.save_upload` puts the original in the same bucket
+    the chat attachments use, and `learn.ingest` produces the text, which is
+    the only thing a prompt can actually be given. A scanned PDF has no text
+    layer and no OCR step exists here, so it is stored as a failed file with
+    the reason attached rather than as an empty one the user has to diagnose.
+    """
+    allowed, retry = _upload_limiter.check(project_id)
+    if not allowed:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Too many uploads. Try again in {retry}s.",
+        )
+    await require_project(user_id, project_id)
+
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            "File is larger than the 20 MB limit.",
+        )
+    filename = file.filename or "upload"
+    content_type = file.content_type or ""
+
+    is_pdf = content_type == PDF_TYPE or filename.lower().endswith(".pdf")
+    if is_pdf:
+        stored = await save_upload(project_id, filename, PDF_TYPE, data)
+        extracted = await asyncio.to_thread(ingest.from_pdf, data, filename)
+        storage_path = stored.get("storage_path")
+    else:
+        # Anything else is treated as text. Decoded leniently on purpose: a
+        # source file with one stray byte is still worth reading, and refusing
+        # the whole upload over it would be a worse answer than dropping the
+        # byte.
+        try:
+            raw = data.decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                "That file could not be read as text. Attach a PDF or a text file.",
+            ) from exc
+        extracted = ingest.from_text(raw, title=filename)
+        storage_path = None
+
+    row = await repository.add_project_file(
+        project_id,
+        name=filename,
+        content=extracted.text if extracted.ok else "",
+        storage_path=storage_path,
+        mime=content_type or (PDF_TYPE if is_pdf else "text/plain"),
+        bytes_=len(data),
+        status="ready" if extracted.ok else "failed",
+        error=None if extracted.ok else (extracted.error or "No text could be read."),
+    )
+    if not row:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Project knowledge needs Supabase configured to persist.",
+        )
+    row.pop("content", None)
+    return row
+
+
+@router.delete(
+    "/projects/{project_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_project_file(
+    project_id: str, file_id: str, user_id: str | None = Depends(bearer_user)
+):
+    await require_project_file(user_id, project_id, file_id)
+    await repository.delete_project_file(file_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- memory ----------------------------------------------------------------
+
+
+@router.get("/memories")
+async def list_memories(user_id: str | None = Depends(bearer_user)):
+    """What this account is remembered to have said about itself.
+
+    Anonymous callers get an empty list rather than a shared one: there is no
+    account to remember against, and pooling memories under a sentinel would
+    let one browser's stated preferences steer another's answers.
+    """
+    if not user_id:
+        return {"enabled": False, "memories": []}
+    prefs = await repository.get_preferences(user_id)
+    return {
+        "enabled": bool(prefs.get("memory_enabled", True)),
+        "memories": await repository.list_memories(user_id),
+    }
+
+
+@router.post("/memories", status_code=status.HTTP_201_CREATED)
+async def add_memory(
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Add a memory by hand, from the Settings panel."""
+    if not user_id:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "Sign in to save what Loom remembers."
+        )
+    content = str((payload or {}).get("content") or "").strip()
+    if not content:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A memory needs content.")
+    if len(content) > 300:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A memory is at most 300 characters. Longer context belongs in a "
+            "project's instructions, where it applies to the work it is about.",
+        )
+    row = await repository.add_memory(user_id, content)
+    if not row:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Memory needs Supabase configured to persist.",
+        )
+    return row
+
+
+@router.delete("/memories/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_memory(memory_id: str, user_id: str | None = Depends(bearer_user)):
+    """Forget one thing.
+
+    Scoped to the caller inside the query rather than by reading the row first
+    and comparing: a memory has no route that exposes it to anyone else, so the
+    scoped delete is both the check and the action.
+    """
+    if not user_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign in to manage memory.")
+    await repository.delete_memory(memory_id, user_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/memories", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_memories(user_id: str | None = Depends(bearer_user)):
+    """Forget everything for this account."""
+    if not user_id:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign in to manage memory.")
+    await repository.clear_memories(user_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

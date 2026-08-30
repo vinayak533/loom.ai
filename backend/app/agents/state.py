@@ -24,6 +24,11 @@ class SpecialistState(TypedDict, total=False):
     #: being continued under another.
     agent_id: str
 
+    # Which project this session belongs to, or "" for none. Same contract as
+    # the Chat/Code state: absent on checkpoints written before projects
+    # existed, so every read defaults to "".
+    project_id: str
+
     #: The user this turn is charged to. Carried in state so a resumed run
     #: still bills the right account after a reconnect.
     user_id: str

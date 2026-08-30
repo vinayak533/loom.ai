@@ -128,8 +128,14 @@ async def run_turn(
     model_id: str | None = None,
     user_id: str | None = None,
     section: str = "chat",
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """Append a user message and run the loop until the agent stops.
+
+    ``project_id`` is read from the session row by the caller, not from prior
+    state: a session moved into a project between turns has to pick the
+    project's instructions up on its very next message, and prior state would
+    still be holding the value from before the move.
 
     ``section`` is which surface this turn belongs to — 'chat' or 'code'. It
     is carried into graph state purely for attribution: the credit ledger, the
@@ -165,6 +171,7 @@ async def run_turn(
     payload = {
         "session_id": session_id,
         "section": section,
+        "project_id": project_id or "",
         "model_id": effective_model,
         "routing_mode": routing_mode,
         "routing_hint": "" if routing_mode == "manual" else prior.get("routing_hint", ""),

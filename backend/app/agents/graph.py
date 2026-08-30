@@ -35,6 +35,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from app import events as ev
+from app import preamble
 from app.cancel import is_stopping
 from app.turnstop import (
     STOPPED_TOOL_TEXT,
@@ -234,7 +235,15 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
     # specialism, so this is worth saying out loud rather than silently
     # degrading to a chat model with an unusual system prompt.
     tools = schemas_for(agent.tools) if meta["supports_tools"] else []
-    system = agent.system_prompt()
+    # The specialist's own persona and operating notes come first; the
+    # account's memory and the project's instructions are appended behind them
+    # by `preamble.compose`. A specialist is chosen for how it works, so a user
+    # preference qualifies that rather than replacing it.
+    system = await preamble.compose(
+        agent.system_prompt(),
+        user_id=state.get("user_id") or None,
+        project_id=state.get("project_id") or None,
+    )
 
     # --- tool budget ------------------------------------------------------
     # Enforced by withholding the schemas rather than by cutting the run off.

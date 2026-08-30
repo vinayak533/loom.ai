@@ -18,6 +18,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app import cancel
+from app import memory
 from app.api import rerun
 from app import events as ev
 from app.agent import runner
@@ -474,12 +475,22 @@ async def _run(
     # turn and end it before its first token.
     cancel.clear(session_id)
 
+    # Which project this session is in, read per turn rather than captured at
+    # connect: moving a session into a project has to take effect on its very
+    # next message, and a value cached at connect would still be the old one.
+    # Started before the credit check so the two round trips overlap instead of
+    # queueing — both sit between the user hitting enter and the first token.
+    row_task = asyncio.create_task(repository.get_session(session_id))
+
     try:
         await ensure_can_start(user_id, section)
     except InsufficientCredits as exc:
+        row_task.cancel()
         emitter.emit(ev.error(str(exc)))
         emitter.emit(ev.agent_done(0, "insufficient_credits"))
         return
+
+    project_id = ((await row_task) or {}).get("project_id")
 
     repository.fire(repository.add_message(session_id, "user", text))
     repository.fire(
@@ -501,10 +512,20 @@ async def _run(
             model_id=model_id,
             user_id=user_id,
             section=section,
+            project_id=project_id,
         )
         reason = final.get("stop_reason") or "end_turn"
         if reason != "max_iterations":
             emitter.emit(ev.agent_done(int(final.get("iterations") or 0), reason))
+        # Learn from the exchange, after the user has their answer and off the
+        # critical path. Deliberately not awaited: it is a second model call,
+        # and nothing the user is waiting for depends on it. A turn the user
+        # stopped is skipped — a cut-off exchange is the worst possible source
+        # of a fact meant to persist.
+        if reason not in ("cancelled", "error"):
+            repository.fire(
+                memory.extract(user_id, session_id, text, _assistant_text(final))
+            )
     except asyncio.CancelledError:
         emitter.emit(ev.error("Run cancelled."))
         emitter.emit(ev.agent_done(0, "cancelled"))
@@ -551,3 +572,25 @@ async def _maybe_title(session_id: str, text: str) -> None:
             await repository.touch_session(session_id, title=title)
     except Exception:  # noqa: BLE001
         log.debug("Title generation skipped", exc_info=True)
+
+
+def _assistant_text(final: dict) -> str:
+    """Plain text of the reply this turn produced, for memory extraction.
+
+    Reads the last assistant turn out of the finished graph state. Tool calls
+    and thinking blocks are skipped: what is worth remembering is what the user
+    was told, not how it was arrived at.
+    """
+    for message in reversed(list(final.get("messages") or [])):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        parts = [
+            str(block.get("text") or "")
+            for block in (content or [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return "\n".join(p for p in parts if p).strip()
+    return ""

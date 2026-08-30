@@ -31,6 +31,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from app import events as ev
+from app import preamble
 from app.agent.prompts import SYSTEM_PROMPT
 from app.cancel import is_stopping
 from app.agent.state import AgentState
@@ -284,12 +285,22 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
                 )
             )
 
+    # The account's memory and the project's standing instructions, in front of
+    # this surface's own prompt. Composed per turn rather than cached on the
+    # state: a preference changed in Settings has to take effect on the next
+    # message, not on the next session.
+    system_prompt = await preamble.compose(
+        SYSTEM_PROMPT,
+        user_id=state.get("user_id") or None,
+        project_id=state.get("project_id") or None,
+    )
+
     try:
         stream = stream_with_fallback(
             model_id,
             messages=messages,
             tools=[] if over_ceiling else (TOOLS if meta["supports_tools"] else []),
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             on_fallback=_on_fallback,
             section=section,
         )

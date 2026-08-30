@@ -366,6 +366,11 @@ async def _run(
     # A stop asked for while nothing was running must not land on this turn.
     cancel.clear(session_id)
 
+    # Read per turn, not captured at connect, so moving a session into a
+    # project takes effect on its next message. Fired ahead of the writes below
+    # so it is in flight while they are queued rather than after them.
+    row_task = asyncio.create_task(repository.get_session(session_id))
+
     repository.fire(repository.add_message(session_id, "user", text))
     repository.fire(repository.touch_session(session_id, status="running"))
     if title_it:
@@ -380,6 +385,7 @@ async def _run(
             file_ids,
             model_id=model_id,
             user_id=user_id,
+            project_id=((await row_task) or {}).get("project_id"),
         )
         reason = final.get("stop_reason") or "end_turn"
         if reason != "max_iterations":

@@ -661,3 +661,140 @@ create policy "own preferences" on public.user_preferences
 insert into storage.buckets (id, name, public)
 values ('uploads', 'uploads', false)
 on conflict (id) do nothing;
+
+
+-- ============================================================================
+--  Projects and memory
+-- ============================================================================
+-- Two different kinds of "remember this", deliberately kept apart.
+--
+-- A **project** is a container the user makes on purpose: a name, a set of
+-- sessions, standing instructions for that work, and files the agent should
+-- treat as background knowledge. Scope is explicit — instructions apply to the
+-- sessions inside the project and nowhere else.
+--
+-- **Memory** is per-account and applies everywhere: who the person is, how they
+-- want to be answered, and facts worth carrying between conversations. It is
+-- not scoped to anything, which is exactly why it is a separate table with its
+-- own on/off switch rather than a project with no sessions.
+--
+-- Both end up as text prepended to the system prompt (see app/projects.py and
+-- app/memory.py). Nothing here is ever shown to a model that the user has not
+-- put there themselves or approved.
+
+create table if not exists public.projects (
+  id           uuid primary key default uuid_generate_v4(),
+  -- uuid, matching `sessions.user_id`, because a project owns sessions and the
+  -- two are compared directly. Null is the anonymous shelf, the same set
+  -- `repository.list_sessions` already shows a caller with no token.
+  user_id      uuid references auth.users (id) on delete cascade,
+  name         text        not null default 'New project',
+  description  text,
+  -- Standing instructions for every session in this project. Null and empty
+  -- mean the same thing here (nothing to inject) — unlike
+  -- `user_preferences.default_model_id`, where the distinction carries meaning.
+  instructions text,
+  -- Presentation only. A seed for the generated cover and the accent applied
+  -- to the project's rows, so a project has an identity without an upload.
+  color        text        not null default 'slate',
+  icon         text,
+  is_archived  boolean     not null default false,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create index if not exists projects_user_updated_idx
+  on public.projects (user_id, is_archived, updated_at desc);
+
+-- ---------------------------------------------------------- project knowledge
+-- `content` holds extracted plain text, for the same reason
+-- `notebook_sources.content` does: what gets injected into a prompt is text,
+-- never the original bytes. `storage_path` points at the original in the
+-- `uploads` bucket when one was kept.
+--
+-- `char_count` is stored rather than derived because the injection budget is
+-- enforced before the content column is read — see `projects.context_block`,
+-- which needs to know how big a file is in order to decide whether to include
+-- it, and would otherwise have to fetch every file to find out.
+create table if not exists public.project_files (
+  id            uuid primary key default uuid_generate_v4(),
+  project_id    uuid not null references public.projects (id) on delete cascade,
+  name          text not null default 'Untitled',
+  storage_path  text,
+  content       text,
+  char_count    integer not null default 0,
+  mime          text,
+  bytes         integer not null default 0,
+  status        text not null default 'ready',   -- ready | failed
+  error         text,
+  added_at      timestamptz not null default now()
+);
+create index if not exists project_files_project_idx
+  on public.project_files (project_id, added_at);
+
+-- Which project a session belongs to. Null means "not in a project", which is
+-- the normal case and stays the default — adding projects must not reorganise
+-- history that already exists.
+--
+-- `on delete set null`, not cascade: deleting a project is a statement about
+-- the container, not about the conversations inside it. Cascading here would
+-- make "remove this project" silently destroy every session in it, which is
+-- not what the word delete means to the person clicking it.
+alter table public.sessions
+  add column if not exists project_id uuid references public.projects (id) on delete set null;
+create index if not exists sessions_project_idx
+  on public.sessions (user_id, project_id, is_archived, updated_at desc);
+
+-- ------------------------------------------------------------------- memory
+-- Per-account, applies to every section. `text` user_id rather than uuid, to
+-- match `user_preferences` — these are read together on the same hot path and
+-- a type mismatch between them would mean a cast on every join.
+create table if not exists public.user_memories (
+  id                uuid primary key default uuid_generate_v4(),
+  user_id           text not null,
+  content           text not null,
+  -- Where it came from, so the Settings list can say "learned in <session>"
+  -- and the user can judge a fact by its origin. Null for one typed by hand.
+  -- `on delete set null` — deleting the conversation does not unlearn the fact.
+  source_session_id uuid references public.sessions (id) on delete set null,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+create index if not exists user_memories_user_idx
+  on public.user_memories (user_id, created_at desc);
+
+-- The two halves of "custom instructions", as separate columns because they
+-- are asked as two separate questions in the UI and injected under two
+-- separate headings. `memory_enabled` defaults true, but an account with no
+-- preferences row has no memories either, so the default is only ever read for
+-- someone who has already used the feature.
+alter table public.user_preferences
+  add column if not exists about_you text;
+alter table public.user_preferences
+  add column if not exists response_style text;
+alter table public.user_preferences
+  add column if not exists memory_enabled boolean not null default true;
+
+-- ------------------------------------------------------------- RLS policies
+-- Same rule as every table above: the backend holds the service-role key and
+-- bypasses these entirely. They exist so the browser's anon key cannot read
+-- another account's projects, knowledge files or memories.
+alter table public.projects       enable row level security;
+alter table public.project_files  enable row level security;
+alter table public.user_memories  enable row level security;
+
+drop policy if exists "own projects" on public.projects;
+create policy "own projects" on public.projects
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Joined through the parent, matching the notebook_sources policy: a file has
+-- no user_id of its own and inherits entitlement from the project holding it.
+drop policy if exists "own project files" on public.project_files;
+create policy "own project files" on public.project_files
+  for select using (
+    exists (select 1 from public.projects p
+             where p.id = project_files.project_id and p.user_id = auth.uid()));
+
+drop policy if exists "own memories" on public.user_memories;
+create policy "own memories" on public.user_memories
+  for all using (auth.uid()::text = user_id)
+  with check (auth.uid()::text = user_id);

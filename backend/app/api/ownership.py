@@ -143,3 +143,33 @@ def owns_row(user_id: str | None, row: dict | None) -> bool:
     if row is None:
         return True
     return _same_owner(row.get("user_id"), user_id)
+
+
+async def require_project(user_id: str | None, project_id: str) -> dict:
+    """Fetch a project, or refuse. Returns the row so callers need not re-read it."""
+    row = await repository.get_project(project_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
+    if not _same_owner(row.get("user_id"), user_id):
+        raise _deny("project")
+    return row
+
+
+async def require_project_file(
+    user_id: str | None, project_id: str, file_id: str
+) -> dict:
+    """Fetch a knowledge file, or refuse.
+
+    Two checks, not one, and the second is the one that matters: the project is
+    verified first so a caller cannot reach *any* file through a project they
+    own, then the file is confirmed to actually belong to that project. Without
+    the second, `/projects/{mine}/files/{yours}` would read another account's
+    upload — the same shape as `require_source` above, and for the same reason.
+    """
+    await require_project(user_id, project_id)
+    row = await repository.get_project_file(file_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such file.")
+    if row.get("project_id") != project_id:
+        raise _deny("file")
+    return row

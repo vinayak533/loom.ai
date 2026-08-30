@@ -173,6 +173,8 @@ async def list_sessions(
     archived: bool = False,
     agent_id: str | None = None,
     section: str | None = None,
+    project_id: str | None = None,
+    project_scoped: bool = False,
 ) -> list[dict]:
     """The session shelf.
 
@@ -193,6 +195,11 @@ async def list_sessions(
     other's. Passing None keeps the old behaviour and is only for callers that
     genuinely want every non-agent session (the audit script).
 
+    ``project_id`` narrows to one project, but only when ``project_scoped`` is
+    True. The two arguments exist separately because None is a real value here
+    and means something specific — "sessions in no project at all", which is
+    what the default shelf shows — so it cannot double as "do not filter".
+
     Note on ``user_id``: passing None scopes the list to rows with a null
     ``user_id`` — the anonymous shelf — and NOT to every row in the table.
     This service holds the service-role key, so RLS does not apply to it and an
@@ -202,7 +209,7 @@ async def list_sessions(
         return []
     client = get_client()
 
-    def _query(filtered: bool, scoped: bool, sectioned: bool):
+    def _query(filtered: bool, scoped: bool, sectioned: bool, projected: bool = False):
         q = client.table("sessions").select("*").order("updated_at", desc=True).limit(limit)
         # Always scope by owner. `is_("user_id", "null")` rather than "no
         # filter" is the whole point: anonymous callers get the anonymous
@@ -225,10 +232,20 @@ async def list_sessions(
                 if section == "chat"
                 else q.eq("section", section)
             )
+        if projected:
+            q = (
+                q.eq("project_id", project_id)
+                if project_id
+                else q.is_("project_id", "null")
+            )
         return q.execute()
 
-    res = await _run(_query, True, True, True)
+    res = await _run(_query, True, True, True, project_scoped)
     sectioned_in_sql = res is not None
+    # The project column is only ever filtered on the first attempt; every
+    # fallback below drops it, so a database missing the column still returns a
+    # usable list and the narrowing is redone in Python at the end.
+    projected_in_sql = res is not None
     if res is None:
         # One of the columns is missing on a database that has not run the
         # migrations. Rather than reporting an empty history, fall back through
@@ -252,6 +269,9 @@ async def list_sessions(
 
     if not scoped_in_sql:
         rows = [r for r in rows if (r.get("agent_id") or None) == agent_id]
+
+    if project_scoped and not projected_in_sql:
+        rows = [r for r in rows if (r.get("project_id") or None) == (project_id or None)]
 
     if section and not sectioned_in_sql:
         # Degraded path only. A legacy row whose section was never determined
@@ -847,6 +867,9 @@ async def set_preferences(
     user_id: str,
     default_model_id: str | None = None,
     theme: str | None = None,
+    about_you: str | None = None,
+    response_style: str | None = None,
+    memory_enabled: bool | None = None,
 ) -> dict:
     """Write the preferences this call names, leaving the rest alone.
 
@@ -861,6 +884,16 @@ async def set_preferences(
         row["default_model_id"] = default_model_id or None
     if theme is not None:
         row["theme"] = theme
+    # The two custom-instruction columns follow the same convention as the
+    # model preference above: "" clears, None means this call is not about
+    # them. A user who blanks the box is saying something different from one
+    # who never opened it.
+    if about_you is not None:
+        row["about_you"] = about_you.strip() or None
+    if response_style is not None:
+        row["response_style"] = response_style.strip() or None
+    if memory_enabled is not None:
+        row["memory_enabled"] = bool(memory_enabled)
     res = await _run(
         lambda: client.table("user_preferences")
         .upsert(row, on_conflict="user_id")
@@ -1001,3 +1034,314 @@ def _snippet(content: str, term: str, width: int = 90) -> str:
     start = max(0, at - width // 3)
     end = min(len(flat), at + len(term) + width // 2)
     return ("… " if start else "") + flat[start:end] + (" …" if end < len(flat) else "")
+
+
+# --- projects --------------------------------------------------------------
+#
+# A project is a container for sessions plus the standing instructions and
+# knowledge files that apply to them. Ownership follows `sessions`: uuid
+# user_id, and None means the anonymous shelf rather than "every row" — the
+# same rule `list_sessions` documents at length, and for the same reason.
+
+
+async def create_project(
+    user_id: str | None = None,
+    name: str = "New project",
+    description: str | None = None,
+    instructions: str | None = None,
+    color: str = "slate",
+    icon: str | None = None,
+) -> dict:
+    """Create a project. Returns the row, or {} when persistence is off."""
+    if not enabled():
+        return {}
+    client = get_client()
+    row: dict[str, Any] = {
+        "user_id": user_id,
+        "name": name.strip() or "New project",
+        "description": (description or "").strip() or None,
+        "instructions": (instructions or "").strip() or None,
+        "color": color or "slate",
+        "icon": icon,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    res = await _run(lambda: client.table("projects").insert(row).execute())
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else {}
+
+
+async def list_projects(
+    user_id: str | None = None,
+    archived: bool = False,
+    limit: int = 100,
+) -> list[dict]:
+    """This account's projects, most recently touched first.
+
+    Passing ``user_id=None`` scopes to rows whose ``user_id`` is null — the
+    anonymous shelf — and NOT to every project in the table. This service holds
+    the service-role key, so an unfiltered query here would hand one caller
+    every other account's projects.
+    """
+    if not enabled():
+        return []
+    client = get_client()
+
+    def _query():
+        q = client.table("projects").select("*").eq("is_archived", archived)
+        q = q.is_("user_id", "null") if user_id is None else q.eq("user_id", user_id)
+        return q.order("updated_at", desc=True).limit(limit).execute()
+
+    res = await _run(_query)
+    return (getattr(res, "data", None) if res else None) or []
+
+
+async def get_project(project_id: str) -> dict | None:
+    """One project by id, or None.
+
+    Entitlement is the caller's job — see `api/ownership.require_project`.
+    """
+    if not enabled():
+        return None
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("projects")
+            .select("*")
+            .eq("id", project_id)
+            .limit(1)
+            .execute()
+        )
+
+    res = await _run(_query)
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else None
+
+
+async def set_project(project_id: str, **fields: Any) -> dict | None:
+    """Update the columns this call names, leaving the rest alone.
+
+    Only the columns listed below can be written, so a stray key in a request
+    body cannot reach the table.
+    """
+    if not enabled():
+        return None
+    allowed = {
+        "name",
+        "description",
+        "instructions",
+        "color",
+        "icon",
+        "is_archived",
+    }
+    row: dict[str, Any] = {
+        k: v for k, v in fields.items() if k in allowed and v is not None
+    }
+    if not row:
+        return await get_project(project_id)
+    row["updated_at"] = _now()
+    client = get_client()
+    await _run(
+        lambda: client.table("projects").update(row).eq("id", project_id).execute()
+    )
+    return await get_project(project_id)
+
+
+async def delete_project(project_id: str) -> None:
+    """Delete a project. Sessions inside it survive — the FK is `set null`.
+
+    That is deliberate and is explained on the column in schema.sql: removing
+    the container is not a statement about the conversations in it.
+    """
+    if not enabled():
+        return
+    client = get_client()
+    await _run(lambda: client.table("projects").delete().eq("id", project_id).execute())
+
+
+async def set_session_project(session_id: str, project_id: str | None) -> None:
+    """Move a session into a project, or out of one with ``None``."""
+    if not enabled():
+        return
+    client = get_client()
+    await _run(
+        lambda: client.table("sessions")
+        .update({"project_id": project_id, "updated_at": _now()})
+        .eq("id", session_id)
+        .execute()
+    )
+
+
+# --- project knowledge files -----------------------------------------------
+
+
+async def add_project_file(
+    project_id: str,
+    name: str,
+    content: str | None = None,
+    storage_path: str | None = None,
+    mime: str | None = None,
+    bytes_: int = 0,
+    status: str = "ready",
+    error: str | None = None,
+) -> dict:
+    """Attach one knowledge file to a project.
+
+    ``char_count`` is stored rather than derived: `projects.context_block`
+    decides what fits in the injection budget before it reads any content, and
+    would otherwise have to fetch every file to find out how big it is.
+    """
+    if not enabled():
+        return {}
+    client = get_client()
+    row: dict[str, Any] = {
+        "project_id": project_id,
+        "name": name,
+        "content": content,
+        "char_count": len(content or ""),
+        "storage_path": storage_path,
+        "mime": mime,
+        "bytes": bytes_,
+        "status": status,
+        "error": error,
+        "added_at": _now(),
+    }
+    res = await _run(lambda: client.table("project_files").insert(row).execute())
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else {}
+
+
+async def list_project_files(project_id: str, with_content: bool = False) -> list[dict]:
+    """Files attached to a project.
+
+    ``with_content=False`` omits the text column, which is what every listing
+    wants — a project with a few large files would otherwise send hundreds of
+    kilobytes to render a list of names.
+    """
+    if not enabled():
+        return []
+    client = get_client()
+    columns = (
+        "*"
+        if with_content
+        else "id,project_id,name,storage_path,char_count,mime,bytes,status,error,added_at"
+    )
+
+    def _query():
+        return (
+            client.table("project_files")
+            .select(columns)
+            .eq("project_id", project_id)
+            .order("added_at")
+            .execute()
+        )
+
+    res = await _run(_query)
+    return (getattr(res, "data", None) if res else None) or []
+
+
+async def get_project_file(file_id: str) -> dict | None:
+    """One knowledge file by id, content included."""
+    if not enabled():
+        return None
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("project_files")
+            .select("*")
+            .eq("id", file_id)
+            .limit(1)
+            .execute()
+        )
+
+    res = await _run(_query)
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else None
+
+
+async def delete_project_file(file_id: str) -> None:
+    if not enabled():
+        return
+    client = get_client()
+    await _run(
+        lambda: client.table("project_files").delete().eq("id", file_id).execute()
+    )
+
+
+# --- memory ----------------------------------------------------------------
+#
+# Per-account facts, applying to every section. `text` user_id to match
+# `user_preferences`, which holds the on/off switch and the two custom
+# instruction columns and is read on the same path.
+
+
+async def list_memories(user_id: str, limit: int = 200) -> list[dict]:
+    if not enabled() or not user_id:
+        return []
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("user_memories")
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+    res = await _run(_query)
+    return (getattr(res, "data", None) if res else None) or []
+
+
+async def add_memory(
+    user_id: str, content: str, source_session_id: str | None = None
+) -> dict:
+    """Store one fact. Returns the row so the UI can show it immediately."""
+    if not enabled() or not user_id:
+        return {}
+    content = (content or "").strip()
+    if not content:
+        return {}
+    client = get_client()
+    row: dict[str, Any] = {
+        "user_id": user_id,
+        "content": content,
+        "source_session_id": source_session_id,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+    res = await _run(lambda: client.table("user_memories").insert(row).execute())
+    rows = getattr(res, "data", None) if res else None
+    return rows[0] if rows else {}
+
+
+async def delete_memory(memory_id: str, user_id: str) -> None:
+    """Delete one memory.
+
+    Scoped by ``user_id`` as well as id: this is the one place a memory is
+    removed, and the service-role key would otherwise happily delete somebody
+    else's row given a guessed uuid.
+    """
+    if not enabled() or not user_id:
+        return
+    client = get_client()
+    await _run(
+        lambda: client.table("user_memories")
+        .delete()
+        .eq("id", memory_id)
+        .eq("user_id", user_id)
+        .execute()
+    )
+
+
+async def clear_memories(user_id: str) -> None:
+    """Forget everything for this account. Used by the Settings panel."""
+    if not enabled() or not user_id:
+        return
+    client = get_client()
+    await _run(
+        lambda: client.table("user_memories").delete().eq("user_id", user_id).execute()
+    )
