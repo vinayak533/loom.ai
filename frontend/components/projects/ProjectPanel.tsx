@@ -67,6 +67,21 @@ export function ProjectPanel({
 
   const project = projects.byId(projectId) ?? detail;
 
+  /**
+   * The name field's own text while it is being edited.
+   *
+   * It cannot bind straight to `project.name`: `project` resolves from the
+   * projects list, and typing updated only the local `detail` copy — so the
+   * displayed value never changed and the field could not be typed into at
+   * all. Seeded from the project, and re-seeded only when the field is not
+   * focused, so a save landing mid-word cannot overwrite what is being typed.
+   */
+  const [nameDraft, setNameDraft] = useState("");
+  const nameFocused = useRef(false);
+  useEffect(() => {
+    if (!nameFocused.current) setNameDraft(project?.name ?? "");
+  }, [project?.name]);
+
   const upload = async (files: FileList | null) => {
     if (!files?.length) return;
     setUploading(true);
@@ -115,14 +130,22 @@ export function ProjectPanel({
         <header className="flex shrink-0 items-start justify-between gap-4 border-b border-line px-5 py-4">
           <div className="min-w-0">
             <input
-              value={project?.name ?? ""}
+              value={nameDraft}
               aria-label="Project name"
-              onChange={(e) =>
-                setDetail((d) => (d ? { ...d, name: e.target.value } : d))
-              }
-              onBlur={(e) => {
-                const name = e.target.value.trim();
-                if (name && name !== projects.byId(projectId)?.name) {
+              onFocus={() => {
+                nameFocused.current = true;
+              }}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={() => {
+                nameFocused.current = false;
+                const name = nameDraft.trim();
+                if (!name) {
+                  // A project must have a name; an emptied field reverts
+                  // rather than saving a blank the server would reject.
+                  setNameDraft(project?.name ?? "");
+                  return;
+                }
+                if (name !== projects.byId(projectId)?.name) {
                   void projects.update(projectId, { name });
                 }
               }}

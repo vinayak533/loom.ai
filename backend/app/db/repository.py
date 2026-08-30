@@ -13,7 +13,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from app.config import get_settings
 from app.llm_router import effective_default_model
 from app.db.supabase_client import enabled, get_client
 
@@ -1239,6 +1238,32 @@ async def list_project_files(project_id: str, with_content: bool = False) -> lis
 
     res = await _run(_query)
     return (getattr(res, "data", None) if res else None) or []
+
+
+async def get_project_files(file_ids: list[str]) -> dict[str, dict]:
+    """Content for several knowledge files, keyed by id, in ONE query.
+
+    `projects.context_block` runs on the prompt path of every turn, and doing
+    this per file meant a Supabase round trip each — six small files was six
+    sequential round trips before the model saw a single token. The budget is
+    still decided from the listing's `char_count` first; this only fetches the
+    text for the files that survived it.
+    """
+    if not enabled() or not file_ids:
+        return {}
+    client = get_client()
+
+    def _query():
+        return (
+            client.table("project_files")
+            .select("*")
+            .in_("id", file_ids)
+            .execute()
+        )
+
+    res = await _run(_query)
+    rows = (getattr(res, "data", None) if res else None) or []
+    return {r["id"]: r for r in rows if r.get("id")}
 
 
 async def get_project_file(file_id: str) -> dict | None:

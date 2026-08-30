@@ -73,6 +73,11 @@ async def _get_project_file(file_id):
     return None
 
 
+async def _get_project_files(file_ids):
+    """The batched read `_files_block` uses: one query, keyed by id."""
+    return {f["id"]: dict(f) for f in _FILES if f["id"] in set(file_ids)}
+
+
 async def _get_preferences(user_id):
     return dict(_PREFS)
 
@@ -84,6 +89,7 @@ async def _list_memories(user_id, limit=200):
 repository.get_project = _get_project
 repository.list_project_files = _list_project_files
 repository.get_project_file = _get_project_file
+repository.get_project_files = _get_project_files
 repository.get_preferences = _get_preferences
 repository.list_memories = _list_memories
 

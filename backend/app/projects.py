@@ -133,10 +133,20 @@ async def _files_block(project_id: str) -> str:
     if not chosen:
         return ""
 
+    # One query for every chosen file, not one per file. This runs on the
+    # prompt path of every turn, and the per-file version was a Supabase round
+    # trip each — six small files meant six sequential round trips before the
+    # model saw a token.
+    try:
+        contents = await repository.get_project_files([r["id"] for r in chosen])
+    except Exception:  # noqa: BLE001
+        log.warning("Project %s file contents unreadable", project_id, exc_info=True)
+        return ""
+
     sections: list[str] = []
     for row in chosen:
-        full = await repository.get_project_file(row["id"])
-        content = _clip((full or {}).get("content") or "", row["_share"])
+        full = contents.get(row["id"]) or {}
+        content = _clip(full.get("content") or "", row["_share"])
         if not content:
             continue
         name = row.get("name") or "Untitled"

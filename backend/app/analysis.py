@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import posixpath
+import shlex
 from typing import Any
 
 from app.credits import charge_llm
@@ -131,10 +132,6 @@ LINT_FILES = (
     ".golangci.yml",
 )
 
-#: A record separator that cannot occur in a path or a count.
-_FS = "\x1f"
-
-
 def _find_prune() -> str:
     """The `-prune` clause excluding every directory in EXCLUDE_DIRS."""
     names = " -o ".join(f"-name {d}" for d in EXCLUDE_DIRS)
@@ -149,8 +146,11 @@ def _script(root: str) -> str:
     whole repository in the time one `sandbox.files.list` call takes.
     """
     prune = _find_prune()
+    # Quoted: `root` is a parameter, and a path with a space in it would
+    # otherwise turn one `cd` into two arguments and silently measure the
+    # wrong directory.
     return f"""
-cd {root} 2>/dev/null || exit 0
+cd {shlex.quote(root)} 2>/dev/null || exit 0
 
 echo "@@FILES"
 find . {prune} -type f -print 2>/dev/null | sed 's|^\\./||' | head -20000

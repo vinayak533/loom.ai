@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Project } from "./projects";
 import {
   createProject,
@@ -157,17 +157,30 @@ export function useProjects(
     [projects],
   );
 
-  return {
-    projects,
-    loading,
-    error,
-    filter,
-    setFilter,
-    reload,
-    create,
-    update,
-    remove,
-    assign,
-    byId,
-  };
+  /**
+   * Memoized, and it has to be.
+   *
+   * This object is passed straight to `SessionSidebar`, which is `memo`'d
+   * specifically so that streaming a reply does not re-render the session
+   * list. A fresh object literal on every render defeats that guard
+   * completely — and it also re-creates every `useCallback` in `page.tsx`
+   * that lists this hook in its dependencies, which defeats the guard a
+   * second way. The members below are each already stable.
+   */
+  return useMemo(
+    () => ({
+      projects,
+      loading,
+      error,
+      filter,
+      setFilter,
+      reload,
+      create,
+      update,
+      remove,
+      assign,
+      byId,
+    }),
+    [projects, loading, error, filter, reload, create, update, remove, assign, byId],
+  );
 }

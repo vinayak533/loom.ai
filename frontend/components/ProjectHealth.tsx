@@ -139,9 +139,12 @@ export const ProjectHealth = memo(function ProjectHealth({
                     const result = await runProjectAnalysis(sessionId, token, true);
                     setNarrative(result.text);
                   } catch (err: unknown) {
+                    // `json()` throws "<status> <statusText> — <detail>".
+                    // The status text is often two words ("Payment Required"),
+                    // so match up to the em dash rather than a single word.
                     setError(
                       err instanceof Error
-                        ? err.message.replace(/^\d+\s+\w+\s+—\s+/, "")
+                        ? err.message.replace(/^\d+\s+[^—]*—\s*/, "")
                         : "The analysis could not run.",
                     );
                   } finally {

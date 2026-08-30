@@ -1271,6 +1271,24 @@ async def project_analysis(
 # --- git: staging, branches, history ---------------------------------------
 
 
+async def _broadcast_tree(session_id: str, why: str) -> None:
+    """Tell the client its file sidebar is stale.
+
+    Any git operation that rewrites the working tree — a checkout, a discard —
+    leaves the sidebar showing a tree that no longer exists, and `git_state`
+    does not carry one. Best-effort: the git panel has already updated, and
+    failing the request because the sidebar could not be refreshed would be a
+    much worse trade.
+    """
+    try:
+        tree = await workspace.list_tree(session_id)
+        emitter = emitter_registry.get(session_id)
+        if emitter:
+            emitter.emit(ev.file_tree(tree["path"], tree["nodes"]))
+    except Exception:  # noqa: BLE001 - see docstring
+        log.debug("Could not refresh tree after %s", why, exc_info=True)
+
+
 @router.post("/sessions/{session_id}/git/stage")
 async def git_stage(
     session_id: str,
@@ -1309,6 +1327,11 @@ async def git_stage(
 
     snapshot = await git.snapshot(session_id)
     _broadcast_git(session_id, snapshot)
+    # A discard removes untracked files from disk entirely, so the sidebar is
+    # listing files that are gone. Staging and unstaging touch only the index
+    # and leave the tree alone, so they do not need this.
+    if mode == "discard":
+        await _broadcast_tree(session_id, "discard")
     return {**result, "snapshot": snapshot}
 
 
@@ -1362,15 +1385,10 @@ async def git_branch_op(
 
     snapshot = await git.snapshot(session_id)
     _broadcast_git(session_id, snapshot)
-    # A checkout rewrites the working tree, so the file sidebar is stale the
-    # moment it succeeds. Nothing else would tell the client that.
-    try:
-        tree = await workspace.list_tree(session_id)
-        emitter = emitter_registry.get(session_id)
-        if emitter:
-            emitter.emit(ev.file_tree(tree["path"], tree["nodes"]))
-    except Exception:  # noqa: BLE001 - the panel still updated; this is extra
-        log.debug("Could not refresh tree after %s", action, exc_info=True)
+    # A checkout or a merge rewrites the working tree, so the sidebar is stale
+    # the moment it succeeds. Creating a branch does not move any file.
+    if action in ("checkout", "merge"):
+        await _broadcast_tree(session_id, action)
 
     return {**result, "snapshot": snapshot}
 
