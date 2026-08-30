@@ -59,6 +59,16 @@ const TONE: Record<ModelToast["tone"], { card: string; mark: string; text: strin
     mark: "bg-accent",
     text: "text-ink",
   },
+  // An involuntary switch: the chosen model errored and the router completed
+  // the request on another one. Warn rather than error — the request succeeded,
+  // so colouring it like a failure would misreport what happened; but it is not
+  // a neutral routing decision either, and the user is entitled to notice that
+  // the model they picked is not the one that answered.
+  fallback: {
+    card: "border-warn/35 bg-[rgba(240,181,74,0.08)]",
+    mark: "bg-warn",
+    text: "text-warn",
+  },
   error: {
     card: "border-del/35 bg-del-bg",
     mark: "bg-del",

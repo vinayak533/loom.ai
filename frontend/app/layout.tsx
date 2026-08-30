@@ -45,6 +45,19 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: "#000000",
+  width: "device-width",
+  initialScale: 1,
+  /**
+   * Let the on-screen keyboard shrink the *layout* viewport rather than only
+   * scrolling over it. Without this, Android Chrome's default
+   * (`resizes-visual`) leaves `100dvh` at its full height while the keyboard
+   * covers the bottom third of it — and the bottom third is where the composer
+   * lives, so typing hid the thing you were typing into. iOS ignores the hint,
+   * which is why `useKeyboardInset` exists as well.
+   */
+  interactiveWidget: "resizes-content",
+  /** Draw into the notch; the safe-area insets below give the padding back. */
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

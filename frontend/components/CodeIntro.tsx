@@ -81,6 +81,25 @@ export function CodeIntro({
   onDismiss: () => void;
 }) {
   const motionOK = useMotionOK();
+  /**
+   * The hard floor under the animation.
+   *
+   * Everything else here is driven by framer-motion, which runs on
+   * `requestAnimationFrame` — and rAF is *paused* in a background tab. Switch
+   * away during the 2.5 seconds this plays and switch back, and the exit
+   * transition has not progressed: `AnimatePresence` is still waiting for an
+   * animation that never ran, so a `fixed inset-0` veil stays over the whole
+   * Code section, swallowing every click and keystroke underneath it. The
+   * section looks broken, and nothing in the transcript explains why.
+   *
+   * `setTimeout` keeps running in a hidden tab, so this is the one clock that
+   * cannot stall. Once it fires the overlay is removed from the tree outright,
+   * with no animation left to wait on. It is set to comfortably outlast the
+   * real exit (420ms), so in the normal case the animation always finishes
+   * first and this never fires.
+   */
+  const [forceGone, setForceGone] = useState(false);
+  const visible = playing && !forceGone;
 
   // Auto-dismiss, and the two skip affordances. One effect so the timer is
   // torn down by the same cleanup that removes the listeners — a skip must not
@@ -100,9 +119,20 @@ export function CodeIntro({
     };
   }, [playing, motionOK, onDismiss]);
 
+  // The floor itself: armed alongside the run, not after it, so a tab that is
+  // hidden for the whole sequence still comes back to a usable section.
+  useEffect(() => {
+    if (!playing) return;
+    const hard = setTimeout(
+      () => setForceGone(true),
+      (motionOK ? RUN_MS : RUN_MS_REDUCED) + 1200,
+    );
+    return () => clearTimeout(hard);
+  }, [playing, motionOK]);
+
   return (
     <AnimatePresence>
-      {playing && (
+      {visible && (
         <motion.div
           key="code-intro"
           // Decorative and self-dismissing: a screen reader should hear the
@@ -122,6 +152,11 @@ export function CodeIntro({
               ? { duration: 0.42, ease: [0.2, 0, 0, 1] }
               : { duration: 0.2 }
           }
+          // Belt to the timer's braces: from the moment `playing` goes false
+          // the veil is decorative. If its exit transition is stalled — see
+          // `forceGone` above — it must not still be eating the clicks meant
+          // for the section behind it.
+          style={{ pointerEvents: playing ? "auto" : "none" }}
           className="fixed inset-0 z-[60] grid place-items-center bg-base"
         >
           {motionOK ? <Weave /> : null}

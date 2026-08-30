@@ -6,10 +6,10 @@ import {
   authEnabled,
   fetchAuthProviders,
   signInWithGoogle,
-  signOutEverywhere,
-  supabase,
   type AuthProviders,
 } from "@/lib/supabase";
+import type { Auth } from "@/lib/useAuth";
+import { EmailSignIn } from "./EmailSignIn";
 import { LoomMark } from "./LoomMark";
 import { cn } from "@/lib/cn";
 
@@ -37,36 +37,21 @@ function GoogleMark({ size = 16 }: { size?: number }) {
  * showing a broken form.
  */
 export function AuthPanel({
-  onToken,
+  auth,
+  onOpenSettings,
   rail,
 }: {
-  onToken: (token: string | null) => void;
+  /** The one auth state, owned by the page. See `lib/useAuth`. */
+  auth: Auth;
+  onOpenSettings: () => void;
   rail?: boolean;
 }) {
-  const [email, setEmail] = useState("");
-  const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<"google" | "signout" | null>(null);
   const [providers, setProviders] = useState<AuthProviders | null>(null);
   const root = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const sb = supabase();
-    if (!sb) return;
-
-    sb.auth.getSession().then(({ data }) => {
-      setUserEmail(data.session?.user.email ?? null);
-      onToken(data.session?.access_token ?? null);
-    });
-
-    const { data: sub } = sb.auth.onAuthStateChange((_e, session) => {
-      setUserEmail(session?.user.email ?? null);
-      onToken(session?.access_token ?? null);
-    });
-    return () => sub.subscription.unsubscribe();
-  }, [onToken]);
+  const userEmail = auth.email;
 
   // Which providers the project has switched on. Asked for once the popover is
   // first opened rather than on mount, so the probe costs nothing to anyone who
@@ -94,18 +79,6 @@ export function AuthPanel({
   const display = userEmail ?? "Local session";
   const initials = (userEmail?.[0] ?? "V").toUpperCase() + (userEmail ? "" : "K");
 
-  const signIn = async () => {
-    setError(null);
-    const sb = supabase();
-    if (!sb || !email.trim()) return;
-    const { error: err } = await sb.auth.signInWithOtp({
-      email: email.trim(),
-      options: { emailRedirectTo: window.location.origin },
-    });
-    if (err) setError(err.message);
-    else setSent(true);
-  };
-
   const googleSignIn = async () => {
     setError(null);
     setBusy("google");
@@ -120,18 +93,14 @@ export function AuthPanel({
 
   const signOut = async () => {
     setBusy("signout");
-    const message = await signOutEverywhere();
+    const message = await auth.signOut();
     setBusy(null);
     if (message) {
       setError(message);
       return;
     }
-    // Clear the panel's own state too. `onAuthStateChange` covers the token and
-    // the email, but the popover would otherwise stay open over a form that has
-    // just become the wrong one, and a stale "check your email" would survive
-    // into the next sign-in.
-    setSent(false);
-    setEmail("");
+    // The popover would otherwise stay open over a form that has just become
+    // the wrong one — and the auth screen is about to take the viewport.
     setError(null);
     setOpen(false);
   };
@@ -150,12 +119,12 @@ export function AuthPanel({
           rail && "justify-center",
         )}
       >
-        <span className="relative grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full bg-[#33363C] text-2xs font-semibold text-ink">
+        <span className="relative grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full bg-raised-solid text-2xs font-semibold text-ink">
           {initials}
           <span
             className={cn(
               "absolute -bottom-px -right-px h-[9px] w-[9px] rounded-full ring-[2.5px] ring-surface",
-              signedIn ? "bg-[#3BC98A]" : "bg-ink-faint",
+              signedIn ? "bg-add" : "bg-ink-faint",
             )}
           />
         </span>
@@ -197,7 +166,7 @@ export function AuthPanel({
             )}
           >
             <div className="flex items-center gap-2.5 px-2 pb-3 pt-2">
-              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#33363C] text-sm font-semibold text-ink">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-raised-solid text-sm font-semibold text-ink">
                 {initials}
               </span>
               <span className="flex min-w-0 flex-col leading-tight">
@@ -218,6 +187,23 @@ export function AuthPanel({
                 enable accounts.
               </p>
             )}
+
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onOpenSettings();
+              }}
+              className="flex h-9 w-full items-center gap-2.5 rounded-ctl px-2 text-sm text-ink-muted
+                         transition-colors duration-200 hover:bg-white/[0.055] hover:text-ink"
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3.1" />
+                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.3a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.7 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.7 8.9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.7a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.7a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.3 9v.09a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15z" />
+              </svg>
+              Settings
+            </button>
 
             {authEnabled && signedIn && (
               <>
@@ -254,76 +240,36 @@ export function AuthPanel({
                   </p>
                 </div>
 
-                {/* Google first: it is the one-click path, and the magic link
-                    below is the fallback for anyone without a Google account.
-                    Kept in the panel's grayscale except for the mark itself,
-                    which is Google's and cannot be recoloured. */}
-                <button
-                  type="button"
-                  disabled={busy === "google"}
-                  onClick={() => void googleSignIn()}
-                  className="flex h-[38px] w-full items-center justify-center gap-2.5 rounded-ctl
-                             border border-line bg-elevated text-sm font-medium text-ink
-                             transition-colors duration-200 hover:bg-white/[0.055]
-                             disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <GoogleMark />
-                  {busy === "google" ? "Opening Google…" : "Continue with Google"}
-                </button>
+                {/* Google first when the project actually has it switched
+                    on. It used to render unconditionally with a paragraph
+                    underneath explaining that it would not work — a button
+                    that says "do not press me" is worse than no button, and
+                    the full sign-in screen already made the other choice. */}
+                {providers?.reachable && providers.google && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={busy === "google"}
+                      onClick={() => void googleSignIn()}
+                      className="flex h-[38px] w-full items-center justify-center gap-2.5 rounded-ctl
+                                 border border-line bg-elevated text-sm font-medium text-ink
+                                 transition-colors duration-200 hover:bg-white/[0.055]
+                                 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <GoogleMark />
+                      {busy === "google" ? "Opening Google…" : "Continue with Google"}
+                    </button>
 
-                {providers && providers.reachable && !providers.google && (
-                  <p className="px-1 text-2xs leading-relaxed text-ink-faint">
-                    Google is not enabled on this Supabase project yet — use the
-                    email link below, or switch it on under Authentication →
-                    Providers.
-                  </p>
+                    <div className="flex items-center gap-2 px-1 py-0.5">
+                      <span className="h-px flex-1 bg-line" />
+                      <span className="text-2xs text-ink-faint">or</span>
+                      <span className="h-px flex-1 bg-line" />
+                    </div>
+                  </>
                 )}
 
-                <div className="flex items-center gap-2 px-1 py-0.5">
-                  <span className="h-px flex-1 bg-line" />
-                  <span className="text-2xs text-ink-faint">or</span>
-                  <span className="h-px flex-1 bg-line" />
-                </div>
+                <EmailSignIn onSignedIn={() => setOpen(false)} />
 
-                <AnimatePresence mode="wait" initial={false}>
-                  {sent ? (
-                    <motion.p
-                      key="sent"
-                      initial={{ opacity: 0, y: 4 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
-                      className="px-1 text-2xs leading-relaxed text-add"
-                    >
-                      Check {email} for a sign-in link.
-                    </motion.p>
-                  ) : (
-                    <motion.div
-                      key="form"
-                      initial={{ opacity: 0, y: 4 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
-                    >
-                      <input
-                        type="email"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        onKeyDown={(e) => e.key === "Enter" && void signIn()}
-                        placeholder="you@example.com"
-                        className="w-full rounded-ctl border border-line bg-elevated px-2.5 py-2 text-xs
-                                   text-ink placeholder:text-ink-faint focus:border-accent-line focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => void signIn()}
-                        className="mt-2 flex h-[38px] w-full items-center justify-center gap-2 rounded-ctl
-                                   bg-brand text-sm font-semibold text-[#0A0E1C]
-                                   transition-all duration-200 hover:brightness-110 active:scale-[0.985]"
-                      >
-                        Send magic link
-                      </button>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
                 {error && <p className="px-1 text-2xs text-del">{error}</p>}
               </div>
             )}

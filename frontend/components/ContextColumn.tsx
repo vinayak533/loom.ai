@@ -174,7 +174,7 @@ export const ContextColumn = memo(function ContextColumn({
             type="button"
             onClick={onDismiss}
             aria-label="Close context panel"
-            className="ml-auto grid h-8 w-8 place-items-center rounded-ctl text-ink-faint
+            className="ml-auto grid h-8 w-8 touch:h-11 touch:w-11 place-items-center rounded-ctl text-ink-faint
                        transition-colors duration-200 hover:bg-elevated hover:text-ink"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round">
@@ -315,6 +315,7 @@ function Face({
       aria-pressed={active}
       className={cn(
         "relative flex max-w-[11rem] items-center gap-1.5 truncate rounded-ctl px-2.5 py-1.5",
+        "touch:min-h-[40px] touch:px-3",
         "transition-colors duration-200",
         mono ? "voice-machine" : "font-sans text-xs font-medium",
         disabled

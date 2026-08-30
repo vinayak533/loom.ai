@@ -77,6 +77,8 @@ export function SectionNav({
               "relative flex items-center gap-3 rounded-ctl text-sm font-medium",
               "transition-colors duration-200 ease-out active:scale-[0.94]",
               collapsed ? "h-10 w-10 justify-center px-0" : "h-10 px-3",
+              "touch:h-11",
+              collapsed && "touch:w-11",
               on ? "text-ink" : "text-ink-muted hover:bg-elevated hover:text-ink",
             )}
           >

@@ -1,15 +1,18 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { BranchGroup } from "@/lib/events";
 import type { AgentState, ChatItem } from "@/lib/useAgentSocket";
 import {
   addYouTubeSource,
-  uploadFile,
+  uploadFileTracked,
   type LearningSource,
   type ModelOption,
 } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { useFeedback } from "@/lib/useFeedback";
+import { makeThumbnail } from "@/lib/thumbnail";
 import {
   extractVideoId,
   greeting,
@@ -18,18 +21,51 @@ import {
   type Section,
 } from "@/lib/sections";
 import { BREATH, EASE_BREATH, SPRING, SPRING_SNAP, useMotionOK } from "./Anim";
-import { AttachMenu, type ImportSummary } from "./AttachMenu";
+import { AttachMenu, type AttachMenuHandle, type ImportSummary } from "./AttachMenu";
+import { SectionEmptyState } from "./EmptyState";
 import { Markdown } from "./Markdown";
 import { ToolCallCard } from "./ToolCallCard";
 import { ModelSelector } from "./ModelSelector";
 import { SourceChips } from "./SourceChips";
+import { FileChip, FileChipRow, chipKindFor, type ChipKind, type ChipState } from "./FileChip";
 import { TraceRow, TraceTail } from "./TraceSpine";
+import {
+  AssistantActions,
+  FeedbackButtons,
+  MessageEditor,
+  UserActions,
+} from "./MessageActions";
 import {
   OutputActions,
   SLIDES_PROMPT,
   SlideDeck,
   STUDY_NOTES_PROMPT,
 } from "./LearningOutputs";
+
+/**
+ * A file the user has added to the next message.
+ *
+ * `fileId` only exists once the upload has landed, which is exactly what makes
+ * a separate type worth having: the chip has to be able to describe a file
+ * that is still on its way, or that never arrived, and `LearningSource` can
+ * only describe one that did.
+ */
+type Attachment = {
+  /** Stable for the chip's whole life, including before the server has an id. */
+  id: string;
+  name: string;
+  kind: ChipKind;
+  size: number;
+  state: ChipState;
+  /** The upload id the backend turns into a document/image block. */
+  fileId?: string;
+  /**
+   * A small data-URI preview, when one could be made - see `lib/thumbnail`.
+   * Absent for types with no natural visual (CSV, code, archives) and for a
+   * PDF with no embedded raster, both of which keep their type icon.
+   */
+  thumbnail?: string;
+};
 
 export function ChatPanel({
   sessionId,
@@ -40,6 +76,9 @@ export function ChatPanel({
   busy,
   onSend,
   onCancel,
+  onEditMessage,
+  onRegenerate,
+  onSwitchBranch,
   models,
   modelChoice,
   autoTargetId,
@@ -55,6 +94,16 @@ export function ChatPanel({
   busy: boolean;
   onSend: (text: string, fileIds: string[]) => boolean;
   onCancel: () => void;
+  /**
+   * Replace user turn `turnIndex` and re-run from there. `turnIndex` is the
+   * ordinal among user messages, which is the coordinate the backend also
+   * uses — see `AgentState.branches`.
+   */
+  onEditMessage?: (turnIndex: number, text: string) => void;
+  /** Re-run the most recent turn on the currently selected model. */
+  onRegenerate?: () => void;
+  /** Move an edited turn to another of its versions. */
+  onSwitchBranch?: (turnIndex: number, version: number) => void;
   models: ModelOption[];
   /** null = Auto */
   modelChoice: string | null;
@@ -68,11 +117,24 @@ export function ChatPanel({
   const [draft, setDraft] = useState("");
   const [sources, setSources] = useState<LearningSource[]>([]);
   const [ingesting, setIngesting] = useState(false);
+  /**
+   * Attachments, from the moment they are picked rather than from the moment
+   * they land. A file used to exist only once the POST came back — so a large
+   * PDF produced a composer that sat there looking idle, with no evidence
+   * anything was happening and no way to change your mind.
+   */
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  /** id -> the controller that can stop that upload. */
+  const aborters = useRef(new Map<string, AbortController>());
   const [usedOutputs, setUsedOutputs] = useState<Set<"notes" | "slides">>(new Set());
+  /** The user turn currently open for editing, by ordinal. Null when none is. */
+  const [editingTurn, setEditingTurn] = useState<number | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const pdfInput = useRef<HTMLInputElement>(null);
+  /** So the empty state can trigger the folder import the menu already owns. */
+  const attachMenu = useRef<AttachMenuHandle>(null);
   const motionOK = useMotionOK();
 
   const meta = SECTION_META[section];
@@ -95,7 +157,9 @@ export function ChatPanel({
   useEffect(() => {
     setSources([]);
     setDraft("");
+    setAttachments([]);
     setUsedOutputs(new Set());
+    setEditingTurn(null);
   }, [section]);
 
   // --- source ingestion ----------------------------------------------------
@@ -140,51 +204,108 @@ export function ChatPanel({
     setDraft(value);
   };
 
-  /** PDFs and images: uploaded, then carried with the next message as blocks. */
-  const ingestPdfs = async (files: FileList | null) => {
+  /**
+   * PDFs, CSVs and images: uploaded now, carried with the next message.
+   *
+   * The chip goes up *before* the request does, so the file is on screen the
+   * instant it is chosen, and the progress it shows is bytes actually sent
+   * rather than a spinner standing in for one.
+   */
+  const ingestFiles = async (files: FileList | null) => {
     if (!files?.length) return;
+    const picked = Array.from(files);
     setIngesting(true);
-    for (const file of Array.from(files)) {
-      try {
-        const up = await uploadFile(sessionId, file, token);
-        setSources((prev) => [
+
+    await Promise.all(
+      picked.map(async (file) => {
+        const id = `att:${crypto.randomUUID()}`;
+        const controller = new AbortController();
+        aborters.current.set(id, controller);
+        setAttachments((prev) => [
           ...prev,
           {
-            kind: "pdf",
-            id: `pdf:${up.id}`,
-            title: up.filename,
-            fileId: up.id,
-            // An image has no character count to report, and labelling its
-            // byte size as one would be a small lie in the chip's subtitle.
-            chars: up.file_type === "application/pdf" ? up.size : undefined,
+            id,
+            name: file.name,
+            kind: chipKindFor(file.name, file.type),
+            size: file.size,
+            state: { phase: "uploading", progress: 0 },
           },
         ]);
-      } catch (err) {
-        setSources((prev) => [
-          ...prev,
-          {
-            kind: "pdf",
-            id: `pdf:err:${file.name}:${Date.now()}`,
-            title: file.name,
-            error: err instanceof Error ? err.message : "Upload failed",
-          },
-        ]);
-      }
-    }
+
+        // Rendered alongside the upload rather than before it. A thumbnail is
+        // decoration on a chip that already exists; making the chip wait for a
+        // canvas would undo the thing the chip is for, which is showing that
+        // something is happening the instant a file is chosen.
+        void makeThumbnail(file).then((thumbnail) => {
+          if (!thumbnail) return;
+          setAttachments((prev) =>
+            prev.map((a) => (a.id === id ? { ...a, thumbnail } : a)),
+          );
+        });
+
+        const patch = (state: ChipState, fileId?: string) =>
+          setAttachments((prev) =>
+            prev.map((a) => (a.id === id ? { ...a, state, ...(fileId ? { fileId } : {}) } : a)),
+          );
+
+        try {
+          const up = await uploadFileTracked(sessionId, file, token, {
+            signal: controller.signal,
+            onProgress: (fraction) =>
+              setAttachments((prev) =>
+                prev.map((a) =>
+                  a.id === id && a.state.phase === "uploading"
+                    ? { ...a, state: { phase: "uploading", progress: fraction } }
+                    : a,
+                ),
+              ),
+          });
+          patch({ phase: "ready" }, up.id);
+        } catch (err) {
+          // A cancel already removed the chip; re-adding an error for it would
+          // undo the thing the user just asked for.
+          if (err instanceof Error && err.name === "AbortError") return;
+          patch({
+            phase: "error",
+            message: err instanceof Error ? err.message : "Upload failed",
+          });
+        } finally {
+          aborters.current.delete(id);
+        }
+      }),
+    );
+
     setIngesting(false);
+  };
+
+  /** Cancel an upload in flight, or take a finished one off. Same control. */
+  const dropAttachment = (id: string) => {
+    aborters.current.get(id)?.abort();
+    aborters.current.delete(id);
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
 
   // --- send ----------------------------------------------------------------
 
-  const armed = draft.trim().length > 0 || sources.length > 0;
+  /** Nothing may be sent while a file is still on its way to the server. */
+  const uploading = attachments.some((a) => a.state.phase === "uploading");
+  const readyAttachments = attachments.filter((a) => a.state.phase === "ready");
+  const armed =
+    !uploading &&
+    (draft.trim().length > 0 ||
+      sources.length > 0 ||
+      readyAttachments.length > 0);
 
   const dispatch = (text: string, extraSources = sources) => {
-    // YouTube transcripts ride inline; PDFs travel as upload ids the backend
-    // turns into native document blocks.
+    // YouTube transcripts ride inline; files travel as upload ids the backend
+    // turns into native document/image blocks.
     const transcripts = extraSources.filter((s) => s.kind === "youtube" && s.text);
-    const fileIds = extraSources
-      .filter((s) => s.kind === "pdf" && s.fileId)
-      .map((s) => s.fileId!);
+    const fileIds = [
+      ...extraSources
+        .filter((s) => s.kind === "pdf" && s.fileId)
+        .map((s) => s.fileId!),
+      ...readyAttachments.map((a) => a.fileId!),
+    ];
 
     let payload = text;
     if (transcripts.length) {
@@ -201,14 +322,56 @@ export function ChatPanel({
 
   const submit = () => {
     const text = draft.trim();
-    if ((!text && sources.length === 0) || busy) return;
-    if (dispatch(text || "Summarise the attached source(s).")) {
+    if (busy || uploading) return;
+    if (!text && sources.length === 0 && readyAttachments.length === 0) return;
+    if (dispatch(text || "Summarise the attached file(s).")) {
       setDraft("");
       setSources([]);
+      // Anything that failed goes with the message it was meant for; leaving a
+      // dead chip behind after a send is how a composer accumulates litter.
+      setAttachments([]);
       setUsedOutputs(new Set());
       pinned.current = true;
     }
   };
+
+  // --- message actions -----------------------------------------------------
+  //
+  // All five are `useCallback`ed because `MemoItem` is memoized on referential
+  // equality — the whole transcript re-renders per streamed token otherwise,
+  // and each row is a framer-motion `layout` element that then re-measures.
+
+  const startEdit = useCallback((turnIndex: number) => {
+    setEditingTurn(turnIndex);
+  }, []);
+
+  const cancelEdit = useCallback(() => setEditingTurn(null), []);
+
+  const submitEdit = useCallback(
+    (turnIndex: number, text: string) => {
+      setEditingTurn(null);
+      // The transcript is not touched here. The server answers with
+      // `history_replaced` and the refetch that follows redraws it — guessing
+      // locally how many turns the rewind removes is how the screen ends up
+      // disagreeing with the model.
+      onEditMessage?.(turnIndex, text);
+      pinned.current = true;
+    },
+    [onEditMessage],
+  );
+
+  const regenerate = useCallback(() => {
+    onRegenerate?.();
+    pinned.current = true;
+  }, [onRegenerate]);
+
+  const switchBranch = useCallback(
+    (turnIndex: number, version: number) => {
+      setEditingTurn(null);
+      onSwitchBranch?.(turnIndex, version);
+    },
+    [onSwitchBranch],
+  );
 
   const generate = (kind: "notes" | "slides") => {
     if (busy) return;
@@ -234,6 +397,73 @@ export function ChatPanel({
       ),
     [state.items],
   );
+
+  /**
+   * Which user turn each visible row is, and which of them have alternates.
+   *
+   * The ordinal is counted over user rows only, because that is exactly what
+   * the backend counts (`repository.user_turn_positions`): a `tool_result`
+   * carrier is a "user" message in the wire format but is not a thing anybody
+   * typed, and numbering by array position would put the two sides out of step
+   * the moment a turn used a tool.
+   *
+   * `visible` differs from `state.items` only by dropping empty assistant
+   * bubbles, so counting here and counting there give the same answer.
+   */
+  const turnIndexOf = useMemo(() => {
+    const map = new Map<string, number>();
+    let n = 0;
+    for (const item of visible) {
+      if (item.kind === "user") map.set(item.id, n++);
+    }
+    return map;
+  }, [visible]);
+
+  const branchAt = useMemo(() => {
+    const map = new Map<number, BranchGroup>();
+    for (const group of state.branches) map.set(group.turn_index, group);
+    return map;
+  }, [state.branches]);
+
+  /**
+   * The last assistant row, which is the only one that offers Regenerate. Held
+   * as an id rather than an index so the check inside the row stays a cheap
+   * equality test and does not re-key on every token.
+   */
+  const { ratings, rate } = useFeedback(sessionId, token);
+
+  /**
+   * Which assistant reply each row is, counting assistant rows from zero.
+   *
+   * A second ordinal alongside `turnIndexOf`, deliberately not shared with it.
+   * Feedback is about a *reply*; branches are about a *question*; and in a
+   * conversation where a turn used tools the two counts diverge. Storing a
+   * verdict against the wrong one of them would silently mis-attribute it.
+   */
+  const assistantIndexOf = useMemo(() => {
+    const map = new Map<string, number>();
+    let n = 0;
+    for (const item of visible) {
+      if (item.kind === "assistant") map.set(item.id, n++);
+    }
+    return map;
+  }, [visible]);
+
+  const onRate = useCallback(
+    (assistantIndex: number, rating: "up" | "down" | null) =>
+      rate(assistantIndex, rating, {
+        modelId: state.modelId,
+        section,
+      }),
+    [rate, state.modelId, section],
+  );
+
+  const lastAssistantId = useMemo(() => {
+    for (let i = visible.length - 1; i >= 0; i--) {
+      if (visible[i].kind === "assistant") return visible[i].id;
+    }
+    return null;
+  }, [visible]);
 
   const streamingAssistant = hasOpenAssistant(state.items);
   /** The thread ends in a live head rather than in the last rendered step. */
@@ -262,16 +492,36 @@ export function ChatPanel({
         className={cn("scroll-thin min-h-0 overflow-y-auto", empty ? "flex-none" : "flex-1")}
       >
         <div className={cn("trace-flow mx-auto w-full px-6 py-9 sm:px-8", measure)}>
-          {visible.map((item, i) => (
-            <MemoItem
-              key={item.id}
-              item={item}
-              section={section}
-              first={i === 0}
-              last={!tail && i === lastIndex}
-              extending={busy && !tail && i === lastIndex}
-            />
-          ))}
+          {visible.map((item, i) => {
+            const turn = turnIndexOf.get(item.id);
+            return (
+              <MemoItem
+                key={item.id}
+                item={item}
+                section={section}
+                first={i === 0}
+                last={!tail && i === lastIndex}
+                extending={busy && !tail && i === lastIndex}
+                busy={busy}
+                turnIndex={turn}
+                branch={turn === undefined ? undefined : branchAt.get(turn)}
+                editing={turn !== undefined && turn === editingTurn}
+                isLastAssistant={item.id === lastAssistantId}
+                assistantIndex={assistantIndexOf.get(item.id)}
+                rating={
+                  assistantIndexOf.has(item.id)
+                    ? ratings[assistantIndexOf.get(item.id)!] ?? null
+                    : null
+                }
+                onRate={onRate}
+                onStartEdit={startEdit}
+                onCancelEdit={cancelEdit}
+                onSubmitEdit={submitEdit}
+                onRegenerate={regenerate}
+                onSwitchBranch={switchBranch}
+              />
+            );
+          })}
 
           <AnimatePresence>
             {tail && (
@@ -311,15 +561,26 @@ export function ChatPanel({
           </div>
         )}
 
-        <div className={cn("mx-auto w-full px-6 pb-5 sm:px-8", measure)}>
+        {/* The home indicator on a notched phone sits over the last ~34px of
+            the screen, which is exactly where the composer's send button was.
+            The inset is added to the padding rather than replacing it, so a
+            device without one is unaffected. */}
+        <div
+          className={cn("mx-auto w-full px-6 pb-5 sm:px-8", measure)}
+          style={{ paddingBottom: "calc(1.25rem + env(safe-area-inset-bottom))" }}
+        >
           <div className="relative">
             <div
               className={cn(
                 "glass relative rounded-card transition-colors duration-200",
                 "hover:border-line-strong",
-                "focus-within:border-accent-line focus-within:shadow-[0_0_0_3px_rgb(var(--acc)/0.10),0_24px_60px_-20px_rgba(0,0,0,0.82)]",
+                "focus-within:border-line-focus focus-within:shadow-[0_0_0_3px_rgba(255,255,255,0.055),0_24px_60px_-20px_rgba(0,0,0,0.82)]",
               )}
             >
+              {/* Sources are a Learn/Code idea — a YouTube transcript pasted
+                  into the thread. Attachments are every section's, including
+                  Chat's, which is where a file used to upload and then show
+                  nothing at all. */}
               {section !== "chat" && sources.length > 0 && (
                 <div className="px-3 pt-3">
                   <SourceChips
@@ -329,6 +590,22 @@ export function ChatPanel({
                     }
                   />
                 </div>
+              )}
+
+              {attachments.length > 0 && (
+                <FileChipRow className="px-3 pt-3">
+                  {attachments.map((a) => (
+                    <FileChip
+                      key={a.id}
+                      kind={a.kind}
+                      title={a.name}
+                      subtitle={formatSize(a.size)}
+                      state={a.state}
+                      thumbnail={a.thumbnail}
+                      onDismiss={() => dropAttachment(a.id)}
+                    />
+                  ))}
+                </FileChipRow>
               )}
 
               <textarea
@@ -348,7 +625,11 @@ export function ChatPanel({
                 disabled={!state.connected}
                 className={cn(
                   "scroll-thin block w-full resize-none bg-transparent px-4 pt-3.5",
-                  "text-ink placeholder:text-ink-faint focus:outline-none disabled:opacity-50",
+                  // The JS auto-grow sets an inline `height`; `min-height`
+                  // outranks it, so this raises the floor on touch without
+                  // fighting the resize.
+                  "touch:min-h-[44px]",
+                  "text-ink placeholder:text-ink-faint focus:outline-none focus-visible:shadow-none disabled:opacity-50",
                   section === "code"
                     ? "font-mono text-[0.8125rem] leading-relaxed"
                     : "font-sans text-[0.9375rem] leading-relaxed",
@@ -362,6 +643,7 @@ export function ChatPanel({
                     first. */}
                 {(section === "code" || section === "chat") && (
                   <AttachMenu
+                    ref={attachMenu}
                     sessionId={sessionId}
                     token={token}
                     disabled={!state.connected}
@@ -369,7 +651,7 @@ export function ChatPanel({
                     // not the two import-into-the-filesystem entries.
                     sandbox={section === "code"}
                     onImported={(summary) => onImported?.(summary)}
-                    onAttach={(files) => void ingestPdfs(files)}
+                    onAttach={(files) => void ingestFiles(files)}
                   />
                 )}
 
@@ -410,7 +692,7 @@ export function ChatPanel({
                       multiple
                       hidden
                       onChange={(e) => {
-                        void ingestPdfs(e.target.files);
+                        void ingestFiles(e.target.files);
                         e.target.value = "";
                       }}
                     />
@@ -443,6 +725,7 @@ export function ChatPanel({
                     aria-label="Send message"
                     className={cn(
                       "ml-2 grid h-[34px] w-[34px] place-items-center rounded-ctl transition-all duration-200",
+                      "touch:h-11 touch:w-11",
                       armed && state.connected
                         ? "bg-gradient-to-br from-accent to-accent-alt text-accent-ink hover:brightness-110 active:scale-[0.92]"
                         : "cursor-not-allowed bg-raised text-ink-dim opacity-55",
@@ -458,24 +741,23 @@ export function ChatPanel({
           </div>
 
           {empty && (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {meta.suggestions.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setDraft(s)}
-                  className={cn(
-                    "flex h-9 items-center gap-2 border border-line bg-elevated px-3.5 text-ink-muted",
-                    "transition-all duration-200 hover:border-accent-line hover:bg-raised hover:text-ink active:scale-[0.98]",
-                    section === "code"
-                      ? "rounded-ctl font-mono text-2xs"
-                      : "rounded-full font-sans text-[0.8125rem]",
-                  )}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
+            <SectionEmptyState
+              className="mt-4"
+              section={section}
+              onUse={(prompt) => {
+                setDraft(prompt);
+                textarea.current?.focus();
+              }}
+              // Code only: a first-run entry point that does the thing rather
+              // than describing it. The menu behind "+" owns the walk-and-
+              // upload pipeline, so this reaches into it rather than growing a
+              // second copy that would get truncation and skips subtly wrong.
+              onOpenFolder={
+                section === "code"
+                  ? () => attachMenu.current?.openFolder()
+                  : undefined
+              }
+            />
           )}
 
           {!state.connected && (
@@ -521,16 +803,65 @@ type RowProps = {
   first: boolean;
   last: boolean;
   extending: boolean;
+  /** A turn is in flight; every action that would start another is disabled. */
+  busy: boolean;
+  /** Ordinal among user turns. Undefined for anything that is not one. */
+  turnIndex?: number;
+  branch?: BranchGroup;
+  editing: boolean;
+  isLastAssistant: boolean;
+  /** Ordinal among assistant replies. Undefined for anything that is not one. */
+  assistantIndex?: number;
+  rating: "up" | "down" | null;
+  onRate: (assistantIndex: number, rating: "up" | "down" | null) => void;
+  onStartEdit: (turnIndex: number) => void;
+  onCancelEdit: () => void;
+  onSubmitEdit: (turnIndex: number, text: string) => void;
+  onRegenerate: () => void;
+  onSwitchBranch: (turnIndex: number, version: number) => void;
 };
 
-function Item({ item, section, first, last, extending }: RowProps) {
+function Item({
+  item,
+  section,
+  first,
+  last,
+  extending,
+  busy,
+  turnIndex,
+  branch,
+  editing,
+  isLastAssistant,
+  assistantIndex,
+  rating,
+  onRate,
+  onStartEdit,
+  onCancelEdit,
+  onSubmitEdit,
+  onRegenerate,
+  onSwitchBranch,
+}: RowProps) {
   switch (item.kind) {
     case "user": {
       // Strip the machine-facing source block from what the user sees.
       const visible = item.text.replace(/<sources>[\s\S]*?<\/sources>\s*/g, "").trim();
+      if (editing && turnIndex !== undefined) {
+        return (
+          <TraceRow kind="user" first={first} last={last} extending={extending} align="end">
+            <MessageEditor
+              initial={visible}
+              onSave={(text) => onSubmitEdit(turnIndex, text)}
+              onCancel={onCancelEdit}
+            />
+          </TraceRow>
+        );
+      }
       return (
         <TraceRow kind="user" first={first} last={last} extending={extending} align="end">
-          <div className="flex max-w-[80%] flex-col items-end gap-2">
+          {/* `group/msg` is what the action row hovers off. Named rather than
+              bare so a nested group — a code block's own copy button, say —
+              cannot reveal it by accident. */}
+          <div className="group/msg relative flex max-w-[80%] flex-col items-end gap-2">
             {item.files.length > 0 && (
               <span className="chip">
                 {item.files.length} attachment{item.files.length === 1 ? "" : "s"}
@@ -550,6 +881,15 @@ function Item({ item, section, first, last, extending }: RowProps) {
                 <p className="voice-said whitespace-pre-wrap">{visible}</p>
               </div>
             )}
+            {turnIndex !== undefined && (
+              <UserActions
+                text={visible}
+                branch={branch}
+                busy={busy}
+                onEdit={() => onStartEdit(turnIndex)}
+                onSwitch={(version) => onSwitchBranch(turnIndex, version)}
+              />
+            )}
           </div>
         </TraceRow>
       );
@@ -564,7 +904,25 @@ function Item({ item, section, first, last, extending }: RowProps) {
           extending={extending}
           live={item.streaming}
         >
-          <AssistantBody item={item} section={section} />
+          <div className="group/msg relative min-w-0">
+            <AssistantBody item={item} section={section} />
+            {!item.streaming && item.text && (
+              <AssistantActions
+                text={item.text}
+                canRegenerate={isLastAssistant}
+                busy={busy}
+                onRegenerate={onRegenerate}
+                extra={
+                  assistantIndex === undefined ? null : (
+                    <FeedbackButtons
+                      rating={rating}
+                      onRate={(next) => onRate(assistantIndex, next)}
+                    />
+                  )
+                }
+              />
+            )}
+          </div>
         </TraceRow>
       );
 
@@ -631,7 +989,11 @@ function AssistantBody({
             type="button"
             onClick={() => setShowThinking((s) => !s)}
             aria-expanded={showThinking}
-            className="voice-label flex items-center gap-1.5 transition-colors hover:text-ink-muted"
+            // The label is 10px tall; the control it sits in must not be. The
+            // negative margin keeps the row's visual position unchanged while
+            // giving the disclosure a real hit area.
+            className="voice-label -my-2 flex min-h-[36px] items-center gap-1.5 transition-colors
+                       hover:text-ink-muted touch:min-h-[44px]"
           >
             <motion.span
               animate={{ rotate: showThinking ? 90 : 0 }}
@@ -688,4 +1050,12 @@ function looksLikeDeck(text: string): boolean {
   const headings = text.match(/^#{2,3}\s+.+$/gm)?.length ?? 0;
   const bullets = text.match(/^[-*+]\s+.+$/gm)?.length ?? 0;
   return headings >= 3 && bullets >= headings * 2;
+}
+
+/** Bytes, for a chip's second line. Two significant figures is plenty here. */
+function formatSize(bytes: number): string {
+  if (!bytes) return "Attached";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

@@ -39,13 +39,37 @@ export function ModelSelector({
    * Id the backend says is active. Paired with `activeName` so the pill can
    * name a model that is *registered but unavailable* — one whose key is not
    * set is filtered out of `models`, and without this the pill fell back to
-   * printing the raw slug ("grok-4-5") instead of "Grok 4.5".
+   * printing the raw slug ("qwen3_7_plus") instead of "Qwen 3.7 Plus".
    */
   activeId?: string;
   onSelect: (id: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  /**
+   * How tall the panel may be, measured rather than assumed.
+   *
+   * A fixed `max-h` in rem is the same bug one viewport further along: this
+   * menu is anchored to the *top* of a control that sits near the bottom of
+   * the window, so the room it has is whatever is above that control, and only
+   * the DOM knows what that is. Measured on open — the one moment it can
+   * change without a resize — and again on resize.
+   */
+  const [roomAbove, setRoomAbove] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const trigger = root.current?.firstElementChild;
+      if (!trigger) return;
+      // 8px for the panel's own offset from the control, 12px so it never
+      // reads as jammed against the top of the window.
+      setRoomAbove(Math.max(160, trigger.getBoundingClientRect().top - 20));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -84,16 +108,11 @@ export function ModelSelector({
     [models],
   );
 
-  // Group by provider, preserving the backend's registry order.
-  const groups = useMemo(() => {
-    const out: { group: string; items: ModelOption[] }[] = [];
-    for (const m of models) {
-      const bucket = out.find((g) => g.group === m.group);
-      if (bucket) bucket.items.push(m);
-      else out.push({ group: m.group, items: [m] });
-    }
-    return out;
-  }, [models]);
+  // Deliberately *not* grouped by provider any more. Which gateway serves a
+  // model is an implementation detail of this deployment; sorting the user's
+  // choice by it asks them to care about something they cannot act on, and
+  // pushed the list past the height of an ordinary window. One flat list, in
+  // the registry's own order.
 
   const pick = (id: string | null) => {
     onSelect(id);
@@ -107,6 +126,10 @@ export function ModelSelector({
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="listbox"
         aria-expanded={open}
+        // The name and nothing else. Who serves the model is our plumbing, not
+        // a fact about the choice being made — and the tooltip was the last
+        // place the provider was still leaking through, including into the
+        // control's accessible name.
         title={
           isAuto
             ? taskRouted
@@ -114,10 +137,11 @@ export function ModelSelector({
                 ? `Auto · currently on ${resolved.name}`
                 : "Auto · picks a model for each turn"
               : `Auto · routed to ${resolved?.name ?? resolvedId}`
-            : `${manualModel?.name ?? resolvedId} · ${manualModel?.group ?? ""}`
+            : (manualModel?.name ?? resolvedId)
         }
         className={cn(
           "group flex h-[30px] max-w-[13rem] items-center gap-2 rounded-full pl-2 pr-2.5",
+          "touch:h-11 touch:pl-3 touch:pr-3.5",
           "text-xs font-medium text-ink-muted transition-colors duration-200 ease-out",
           "hover:bg-raised hover:text-ink",
           open && "bg-raised text-ink",
@@ -161,16 +185,35 @@ export function ModelSelector({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 6, scale: 0.98 }}
             transition={{ duration: 0.2, ease: [0.2, 0, 0, 1] }}
-            style={{ transformOrigin: "bottom left" }}
-            className="absolute bottom-full left-0 z-40 mb-2 w-[17.5rem] origin-bottom-left
-                       rounded-[14px] border border-line bg-overlay p-2 shadow-lift"
+            /**
+             * Bounded, and split into a pinned head and a scrolling body.
+             *
+             * This panel used to be whatever height its contents wanted — 552px
+             * with eight models — and it opens *upwards* from a composer that
+             * sits near the bottom of the window. On any viewport shorter than
+             * about 850px its top ran off the top of the screen, taking the
+             * first row with it. That row is Auto. So the recommended option
+             * was not missing from the menu, it was rendered 141px above the
+             * top of the window with no way to scroll to it: present in the
+             * DOM, unreachable with a mouse.
+             *
+             * Auto now sits outside the scroll area, so it is visible whatever
+             * the window height and however many models the registry grows to.
+             */
+            className="absolute bottom-full left-0 z-40 mb-2 flex w-[17.5rem] max-w-[calc(100vw-2rem)]
+                       origin-bottom-left flex-col overflow-hidden rounded-[14px] border border-line
+                       bg-overlay p-2 shadow-lift"
+            style={{
+              transformOrigin: "bottom left",
+              maxHeight: roomAbove ? `min(26rem, ${roomAbove}px)` : "26rem",
+            }}
           >
             <button
               type="button"
               role="option"
               aria-selected={isAuto}
               onClick={() => pick(null)}
-              className="mb-1 flex w-full items-center gap-2.5 rounded-ctl border-b border-line
+              className="mb-1 flex w-full shrink-0 items-center gap-2.5 rounded-ctl border-b border-line
                          px-2 pb-2.5 pt-1.5 text-left text-sm text-ink-muted
                          transition-colors duration-200 hover:bg-white/[0.055] hover:text-ink"
             >
@@ -192,51 +235,46 @@ export function ModelSelector({
               {isAuto && <CheckGlyph />}
             </button>
 
-            {models.length === 0 && (
-              <p className="px-2 py-2 text-2xs text-ink-faint">
-                No models configured. Add API keys in backend/.env.
-              </p>
-            )}
-
-            {groups.map(({ group, items }) => (
-              <div key={group} className="mt-2 first:mt-1">
-                <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.07em] text-ink-faint">
-                  {group}
+            <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
+              {models.length === 0 && (
+                <p className="px-2 py-2 text-2xs text-ink-faint">
+                  No models configured. Add API keys in backend/.env.
                 </p>
-                {items.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    role="option"
-                    aria-selected={currentId === m.id}
-                    onClick={() => pick(m.id)}
-                    // The Auto pool's models say what they are for. They stay
-                    // hand-pickable; Auto is just the better default.
-                    title={m.description ?? undefined}
-                    className={cn(
-                      "flex w-full items-center gap-2.5 rounded-ctl px-2 py-[7px] text-left text-sm",
-                      "transition-colors duration-200",
-                      currentId === m.id
-                        ? "text-ink"
-                        : "text-ink-muted hover:bg-white/[0.055] hover:text-ink",
+              )}
+
+              {models.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  role="option"
+                  aria-selected={currentId === m.id}
+                  onClick={() => pick(m.id)}
+                  // The Auto pool's models say what they are for. They stay
+                  // hand-pickable; Auto is just the better default.
+                  title={m.description ?? undefined}
+                  className={cn(
+                    "flex w-full items-center gap-2.5 rounded-ctl px-2 py-2 text-left text-sm",
+                    "transition-colors duration-200",
+                    currentId === m.id
+                      ? "text-ink"
+                      : "text-ink-muted hover:bg-white/[0.055] hover:text-ink",
+                  )}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{m.name}</span>
+                    {m.detail && (
+                      <span className="block truncate text-2xs text-ink-faint">
+                        {m.detail}
+                      </span>
                     )}
-                  >
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate">{m.name}</span>
-                      {m.detail && (
-                        <span className="block truncate text-2xs text-ink-faint">
-                          {m.detail}
-                        </span>
-                      )}
-                      {!m.supports_tools && (
-                        <span className="block text-2xs text-warn">text only</span>
-                      )}
-                    </span>
-                    {currentId === m.id && <CheckGlyph />}
-                  </button>
-                ))}
-              </div>
-            ))}
+                    {!m.supports_tools && (
+                      <span className="block text-2xs text-warn">text only</span>
+                    )}
+                  </span>
+                  {currentId === m.id && <CheckGlyph />}
+                </button>
+              ))}
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

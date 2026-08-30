@@ -23,6 +23,14 @@ const config: Config = {
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      // A media query, not a width. Whether a control needs a finger-sized hit
+      // area is a question about the *pointer*, not about how wide the window
+      // is: a 1024px tablet is touch and a 380px desktop window is not. Sizing
+      // by breakpoint gets both of those backwards, which is why the composer
+      // could be 34px on a phone and the rail 40px behind a mouse.
+      screens: {
+        touch: { raw: "(pointer: coarse)" },
+      },
       colors: {
         // Surface ramp. `base` is the floor everything is painted on — pure
         // black, the way ChatGPT's dark theme is: one hex value, no hue, no
@@ -55,6 +63,13 @@ const config: Config = {
         // a little stronger than they were on the old near-black.
         line: "rgba(255,255,255,0.08)",
         "line-strong": "rgba(255,255,255,0.145)",
+        // The third step, for a field that has focus. Hairlines now carry
+        // rest -> hover -> focus as one neutral progression (0.08 / 0.145 /
+        // 0.22). Focus used to jump out of this ramp and into the section
+        // accent, which on Code meant a saturated green box around the
+        // composer — the loudest thing on a screen whose whole premise is that
+        // nothing shouts. Confirmation should be a shade, not an alarm.
+        "line-focus": "rgba(255,255,255,0.22)",
         ink: {
           // Softened a touch from the old near-black ramp: at 18:1 on pure
           // black, near-white body text glares. This still clears every step

@@ -164,7 +164,7 @@ export function RenameDialog({
                   placeholder="Recipe Finder"
                   className="h-9 w-full rounded-ctl border border-line bg-inset px-3
                              font-sans text-[0.875rem] text-ink placeholder:text-ink-faint
-                             transition-colors focus:border-accent-line focus:outline-none"
+                             transition-colors focus:border-line-focus focus:outline-none"
                 />
               </Field>
 
@@ -178,7 +178,7 @@ export function RenameDialog({
                   className="scroll-thin w-full resize-none rounded-ctl border border-line bg-inset
                              px-3 py-2 font-sans text-[0.8125rem] leading-relaxed text-ink
                              placeholder:text-ink-faint transition-colors
-                             focus:border-accent-line focus:outline-none"
+                             focus:border-line-focus focus:outline-none"
                 />
               </Field>
 

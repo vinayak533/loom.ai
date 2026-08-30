@@ -12,15 +12,15 @@ export type Section = "chat" | "learning" | "code" | "agents";
 export const SECTIONS: Section[] = ["chat", "learning", "code", "agents"];
 
 export const FALLBACK_ROUTES: Record<Section, string> = {
-  chat: "grok-4-5",
-  learning: "nemotron-3",
-  code: "llama-4-scout",
+  chat: "deepseek_v4_flash",
+  learning: "mimo_v2_5",
+  code: "mimo_v2_5",
   // Agents has no AUTO_ROUTE_* key of its own on the backend, so Auto resolves
   // it through the chat table. The specialists span every kind of work, and a
   // single section-wide default would be wrong for most of them — per-turn
   // task routing is the right answer here, which is what Auto already does
   // whenever OPENCODE_API_KEY is set.
-  agents: "grok-4-5",
+  agents: "deepseek_v4_flash",
 };
 
 type SectionMeta = {
@@ -29,8 +29,14 @@ type SectionMeta = {
   placeholder: string;
   /** Sends this hint to the backend so Auto can resolve without a round trip. */
   routeKey: Section;
-  suggestions: string[];
 };
+
+// `suggestions` used to live here: three strings per section, rendered as
+// chips under an empty composer. They were removed rather than rewritten,
+// because the problem was not that they were the wrong strings — a starter
+// needs a reason attached to it and, where the section has a real first action
+// (Code can open a folder), it needs to *be* that action rather than a phrase
+// describing one. Neither fits a `string[]`. See `components/EmptyState.tsx`.
 
 export const SECTION_META: Record<Section, SectionMeta> = {
   chat: {
@@ -38,11 +44,6 @@ export const SECTION_META: Record<Section, SectionMeta> = {
     greetingSub: "Ask anything. I'll keep it conversational and get to the point.",
     placeholder: "Message Loom…",
     routeKey: "chat",
-    suggestions: [
-      "Explain what this project does",
-      "Summarise a long document",
-      "Help me plan my week",
-    ],
   },
   learning: {
     // "Learn" in the UI; the key stays `learning` because it is also the
@@ -52,11 +53,6 @@ export const SECTION_META: Record<Section, SectionMeta> = {
       "Drop in a PDF or a YouTube link and we'll build it up step by step.",
     placeholder: "What do you want to understand? Paste a YouTube link…",
     routeKey: "learning",
-    suggestions: [
-      "Explain the CAP theorem",
-      "Quiz me on Rust ownership",
-      "Build a 4-week syllabus",
-    ],
   },
   code: {
     name: "Code",
@@ -64,11 +60,6 @@ export const SECTION_META: Record<Section, SectionMeta> = {
       "Paste a stack trace, a diff, or a half-formed idea. I have a real sandbox.",
     placeholder: "Describe the change, or paste code…",
     routeKey: "code",
-    suggestions: [
-      "Scaffold a FastAPI app with a health endpoint and a test",
-      "Explain this regex",
-      "Write a test for it",
-    ],
   },
   agents: {
     name: "Agents",
@@ -80,7 +71,6 @@ export const SECTION_META: Record<Section, SectionMeta> = {
     // than an unused one.
     placeholder: "Pick a specialist to begin…",
     routeKey: "agents",
-    suggestions: [],
   },
 };
 

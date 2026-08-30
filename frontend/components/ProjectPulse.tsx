@@ -211,7 +211,7 @@ export const ProjectPulse = memo(function ProjectPulse({
             type="button"
             onClick={onExport}
             disabled={exporting}
-            className="flex h-8 flex-1 items-center justify-center gap-1.5 rounded-ctl border
+            className="flex h-8 touch:h-11 flex-1 items-center justify-center gap-1.5 rounded-ctl border
                        border-line bg-elevated text-2xs font-medium text-ink-muted
                        transition-all duration-200 hover:border-accent-line hover:bg-raised
                        hover:text-ink active:scale-[0.985] disabled:pointer-events-none
@@ -227,7 +227,7 @@ export const ProjectPulse = memo(function ProjectPulse({
 
           <span
             title="Vercel deployment is not wired up yet."
-            className="flex h-8 flex-1 cursor-not-allowed items-center justify-center gap-1.5
+            className="flex h-8 touch:h-11 flex-1 cursor-not-allowed items-center justify-center gap-1.5
                        rounded-ctl border border-line bg-inset text-2xs font-medium text-ink-dim"
           >
             Deploy

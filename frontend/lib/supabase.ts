@@ -131,6 +131,78 @@ export async function signInWithGoogle(): Promise<string | null> {
   return error.message;
 }
 
+/* ---------------------------------------------------------------- email OTP
+ * Signing in with an email address, in two steps.
+ *
+ * `signInWithOtp` issues one credential that can be redeemed *either* way: as
+ * a link the user clicks, or as a code they type back in. Which one lands in
+ * the inbox is decided by the project's own "Magic Link" email template —
+ * `{{ .ConfirmationURL }}` renders the link, `{{ .Token }}` renders the
+ * six-digit code, and a template can carry both. Supabase's stock template has
+ * only the link, so a project that has never been edited will send a link even
+ * though `verifyEmailCode` below is perfectly ready to accept a code.
+ *
+ * The app therefore offers both and says so, rather than betting on one: the
+ * code box is there for anyone whose email has a code in it, and the link in
+ * the same message keeps working for everyone else.
+ *
+ * `emailRedirectTo` is only meaningful to the link half. It is still sent,
+ * because a link that returns to the wrong origin is a dead end, and it does
+ * not affect the code.
+ */
+export async function sendEmailCode(email: string): Promise<string | null> {
+  const sb = supabase();
+  if (!sb) {
+    return "Accounts are not configured: NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY are unset in frontend/.env.local.";
+  }
+  const { error } = await sb.auth.signInWithOtp({
+    email: email.trim(),
+    options: {
+      emailRedirectTo: window.location.origin,
+      // The default. Stated because turning it off is what makes this an
+      // invite-only deployment, and a future reader should see the choice.
+      shouldCreateUser: true,
+    },
+  });
+  if (!error) return null;
+  if (/rate|too many|seconds/i.test(error.message)) {
+    return `${error.message} Codes are rate limited per address — wait a moment before asking for another.`;
+  }
+  return error.message;
+}
+
+/**
+ * Redeem the six-digit code. Returns an error message, or null once signed in.
+ *
+ * `type: "email"` covers both a brand-new account and a returning one, which
+ * is why it is used rather than `magiclink` or `signup`: those two split the
+ * same code by whether the address had been seen before, and getting that
+ * wrong rejects a perfectly good code with a confusing "Token has expired or
+ * is invalid".
+ */
+export async function verifyEmailCode(
+  email: string,
+  code: string,
+): Promise<string | null> {
+  const sb = supabase();
+  if (!sb) return "Accounts are not configured.";
+  const token = code.replace(/\D/g, "");
+  // Length is the project's setting, not a constant — this one issues eight
+  // digits. Only the floor is checked, so a longer code is never rejected here
+  // and Supabase stays the authority on whether it is right.
+  if (token.length < 6) return "Enter the code from the email.";
+  const { error } = await sb.auth.verifyOtp({
+    email: email.trim(),
+    token,
+    type: "email",
+  });
+  if (!error) return null;
+  if (/expired|invalid/i.test(error.message)) {
+    return "That code is wrong or has expired. Ask for a new one.";
+  }
+  return error.message;
+}
+
 /**
  * Sign out for real.
  *

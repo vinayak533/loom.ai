@@ -44,6 +44,11 @@
 
     /* Where the ambient field's warm pole sits, in viewport percentages. The
        agent's activity moves it; see AmbientField. */
+    /* How much of the viewport the on-screen keyboard is covering. Written by
+       `useKeyboardInset`; 0 everywhere a keyboard is not in the way, which is
+       every desktop browser and every mobile one with the field unfocused. */
+    --kb-inset: 0px;
+
     --field-x: 62%;
     --field-y: 24%;
     --field-strength: 0.35;

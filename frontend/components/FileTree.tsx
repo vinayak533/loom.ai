@@ -348,10 +348,14 @@ function TreeRow({ node, ...props }: NodesProps & { node: FileNode }) {
               const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
               onMenu({ path: node.path, isDir, x: rect.right, y: rect.bottom });
             }}
+            // `group-hover` never fires without a pointer, so on a phone this
+            // control simply did not exist and a file could not be renamed or
+            // deleted at all. On a coarse pointer it is always there.
             className="absolute right-1 top-1/2 hidden h-5 w-5 -translate-y-1/2 place-items-center
                        rounded-md text-ink-faint opacity-0 transition-opacity duration-150
                        hover:bg-raised hover:text-ink focus-visible:opacity-100
-                       group-hover/row:grid group-hover/row:opacity-100"
+                       group-hover/row:grid group-hover/row:opacity-100
+                       touch:grid touch:h-9 touch:w-9 touch:opacity-100"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
               <circle cx="5" cy="12" r="1.6" />
@@ -579,7 +583,7 @@ function RootButton({
       onClick={onClick}
       title={label}
       aria-label={label}
-      className="grid h-5 w-5 shrink-0 place-items-center rounded-md text-ink-faint
+      className="grid h-5 w-5 touch:h-9 touch:w-9 shrink-0 place-items-center rounded-md text-ink-faint
                  transition-colors duration-150 hover:bg-elevated hover:text-ink"
     >
       <svg

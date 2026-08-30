@@ -5,11 +5,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AUTO_MODEL_ID,
   DEFAULT_MODEL_ID,
+  defaultModelFor,
   autoNameSession,
   createSession,
   deleteSession as apiDeleteSession,
   exportProject,
   fetchConfig,
+  fetchPreferences,
   fetchWorkspaceTree,
   listSessions,
   readWorkspaceFile,
@@ -41,7 +43,13 @@ import { SectionNav } from "@/components/SectionNav";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { ToastHost } from "@/components/Toast";
 import { AuthPanel } from "@/components/AuthPanel";
+import { AuthScreen } from "@/components/AuthScreen";
+import { SettingsDialog } from "@/components/SettingsDialog";
+import { ShortcutsDialog } from "@/components/ShortcutsDialog";
+import { useAuth } from "@/lib/useAuth";
+import { useKeyboardInset } from "@/lib/useKeyboardInset";
 import { cn } from "@/lib/cn";
+import { forgetPersistedLive, readLive, writeLive } from "@/lib/liveSession";
 import {
   FALLBACK_ROUTES,
   SECTIONS,
@@ -50,26 +58,42 @@ import {
 } from "@/lib/sections";
 
 /**
- * One stored session id *per conversational surface*.
+ * One live session id *per conversational surface*.
  *
  * Chat and Code used to share a single key, which meant they shared a single
  * live session — switching section carried the conversation across, and the
  * one history list showed both. They are separate shelves now, so they need
- * separate current-session pointers. The old single-value key is migrated on
- * first boot rather than dropped, so an in-flight conversation survives the
- * upgrade.
+ * separate current-session pointers.
+ *
+ * These are read and written through `lib/liveSession`, which is backed by
+ * `sessionStorage` rather than `localStorage`. See that module for why: a
+ * reload has to keep you in the conversation, and a fresh visit has to start a
+ * new one, and only a per-browsing-session store tells those two apart.
  */
-const SESSION_KEY = "coding-agent:session";
 const SESSION_KEYS: Record<ConvSection, string> = {
   chat: "coding-agent:session:chat",
   code: "coding-agent:session:code",
 };
+/**
+ * The same three keys, as the previous scheme left them in `localStorage`.
+ * Cleared once on boot; see `forgetPersistedLive`.
+ */
+/** Which identity minted the ids above. See the identity effect below. */
+const SESSION_OWNER_KEY = "coding-agent:session:owner";
+const STALE_SESSION_KEYS = [
+  "coding-agent:session",
+  SESSION_KEYS.chat,
+  SESSION_KEYS.code,
+];
 // Bumped whenever the default model changes. A persisted per-section choice is
 // replayed verbatim on load, so without a new key every existing browser would
 // keep selecting the *previous* default — including one that has since been
 // removed from the registry — and the change would never visibly take effect.
-// v3: the default moved to Grok 4.5 when Claude/OpenAI were removed.
-const MODEL_KEY = "coding-agent:model-choice:v3";
+// Bump it on every default change, and on every provider removal: a browser
+// that keeps replaying a model the backend no longer registers gets it
+// silently reassigned on each load, and the accompanying notice never stops
+// appearing. v4 is the current default, Qwen 3.7 Plus.
+const MODEL_KEY = "coding-agent:model-choice:v4";
 const SECTION_KEY = "coding-agent:section";
 const USER_NAME = "Vinayak";
 
@@ -102,7 +126,17 @@ const convSectionOf = (s: Section): ConvSection => (s === "code" ? "code" : "cha
  * used to do.
  */
 export default function Page() {
-  const [token, setToken] = useState<string | null>(null);
+  /**
+   * One owner for the session, rather than one per component that happens to
+   * need it. Signing out has to take the whole app back to a sign-in screen,
+   * which is not something a control buried in the rail can do on its own.
+   */
+  const auth = useAuth();
+  useKeyboardInset();
+  const token = auth.token;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** The keyboard reference, opened with `?` or from Settings. */
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   /**
    * One live session per conversational surface, never one shared between
    * them. Keeping both mounted (rather than swapping a single id) is also what
@@ -165,22 +199,59 @@ export default function Page() {
    * still in the dropdown, still the same code path, and still routes per turn
    * when OpenCode is configured — this only changes which entry is selected
    * before anyone touches the control.
+   *
+   * The starting value is now **per section** rather than one model for all
+   * four: Code opens on MiMo V2.5 and Chat on DeepSeek V4 Flash. These are the
+   * pre-config values; `config.default_model_ids` replaces them the moment
+   * `/api/config` lands, and a stored pick from a previous visit wins over
+   * both.
    */
   const [modelChoice, setModelChoice] = useState<Record<Section, string | null>>({
-    chat: DEFAULT_MODEL_ID,
-    learning: DEFAULT_MODEL_ID,
-    code: DEFAULT_MODEL_ID,
+    chat: defaultModelFor("chat"),
+    learning: defaultModelFor("learning"),
+    code: defaultModelFor("code"),
     // Agents keeps its own per-agent selection inside `AgentSection` — one
     // pick across ten specialists would be wrong for most of them — so this
     // entry exists only to satisfy the record's shape.
-    agents: DEFAULT_MODEL_ID,
+    agents: defaultModelFor("agents"),
   });
+  /**
+   * Whether the user has actually chosen a model for a section this visit (or
+   * in a previous one, via localStorage). Untouched sections follow the
+   * backend's per-section default when config arrives; a section the user has
+   * picked in is never moved out from under them.
+   */
+  const touchedModel = useRef<Partial<Record<Section, true>>>({});
+  /**
+   * Sections whose model the user has changed *since this page loaded*.
+   *
+   * Distinct from `touchedModel`, which also counts picks restored from
+   * localStorage — and that distinction is the whole point. The account
+   * preference has to be able to win over a stale per-browser remnant (that is
+   * what "follows you across devices" means) while never yanking the model out
+   * from under someone who has just chosen one on this screen.
+   */
+  const touchedThisLoad = useRef<Partial<Record<Section, true>>>({});
+  /**
+   * The account's default model, once read. `undefined` while unknown, `null`
+   * when the user has expressed no preference — which is not the same as
+   * choosing the current default, and must stay distinguishable so that a
+   * build whose default moves carries along the people who never chose.
+   */
+  const [accountModel, setAccountModel] = useState<string | null | undefined>(
+    undefined,
+  );
+  /** The token whose preference has already been applied, so it applies once. */
+  const appliedPrefFor = useRef<string | null | undefined>(undefined);
 
   const {
     state,
     busy,
     send,
     cancel,
+    editMessage,
+    regenerate,
+    switchBranch,
     setModel,
     openFile,
     openContent,
@@ -196,26 +267,31 @@ export default function Page() {
 
   // --- bootstrap -----------------------------------------------------------
   useEffect(() => {
-    // Migration: before Chat and Code had separate shelves there was one id
-    // under the old key. Hand it to Chat — an un-sandboxed session is far more
-    // likely to have been one — and give Code a fresh one, rather than pointing
-    // both sections at the same row and reproducing the bug we just fixed.
-    const legacy = localStorage.getItem(SESSION_KEY);
-    const stored: Record<ConvSection, string | null> = {
-      chat: localStorage.getItem(SESSION_KEYS.chat) ?? legacy,
-      code: localStorage.getItem(SESSION_KEYS.code),
-    };
-    if (legacy) localStorage.removeItem(SESSION_KEY);
+    // A reload finds these still set and resumes the conversation. A new
+    // browsing session finds them gone and mints fresh ids, which is what
+    // makes opening the app land on an empty composer instead of on last
+    // week's thread. The previous ids were kept in `localStorage`, which never
+    // expires, so *every* visit resumed — clear those out on the way past.
+    forgetPersistedLive(...STALE_SESSION_KEYS);
     setSessionIds({
-      chat: stored.chat ?? crypto.randomUUID(),
-      code: stored.code ?? crypto.randomUUID(),
+      chat: readLive(SESSION_KEYS.chat) ?? crypto.randomUUID(),
+      code: readLive(SESSION_KEYS.code) ?? crypto.randomUUID(),
     });
 
     const s = localStorage.getItem(SECTION_KEY) as Section | null;
     if (s && SECTIONS.includes(s)) setSection(s);
     try {
       const raw = localStorage.getItem(MODEL_KEY);
-      if (raw) setModelChoice((prev) => ({ ...prev, ...JSON.parse(raw) }));
+      if (raw) {
+        const stored = JSON.parse(raw) as Partial<Record<Section, string | null>>;
+        // A stored pick is a pick: mark it so the config-defaults effect below
+        // leaves it alone. Without this, restoring "I always use Auto in Code"
+        // and then having config land would silently replace it.
+        for (const key of Object.keys(stored) as Section[]) {
+          if (stored[key] !== undefined) touchedModel.current[key] = true;
+        }
+        setModelChoice((prev) => ({ ...prev, ...stored }));
+      }
     } catch {
       /* corrupt value is not worth failing boot over */
     }
@@ -224,9 +300,44 @@ export default function Page() {
   useEffect(() => {
     for (const key of ["chat", "code"] as const) {
       const id = sessionIds[key];
-      if (id) localStorage.setItem(SESSION_KEYS[key], id);
+      if (id) writeLive(SESSION_KEYS[key], id);
     }
   }, [sessionIds]);
+
+  /**
+   * A change of identity starts new sessions.
+   *
+   * Sessions belong to whoever created them, and the backend enforces that:
+   * the socket closes with 4403 when the caller does not own the id in the
+   * path. So carrying the id across a sign-in — from the anonymous shelf to a
+   * named account, or between two accounts — hands the socket an id the new
+   * caller has no claim to, and the app sits on "Disconnected" through a
+   * reconnect loop that can never succeed. Signing in used to do exactly that.
+   *
+   * Minting fresh ids is also the right *product* behaviour: the conversation
+   * you were having as one identity is not the conversation you want handed to
+   * the next one. The old sessions are untouched and remain in the previous
+   * account's history.
+   *
+   * Who the live ids belong to is recorded beside them, in the same
+   * per-browsing-session store, rather than in a ref. A ref only knows what
+   * happened since this component mounted, and the case that actually breaks
+   * is the one it cannot see: signing in, then *reloading*, which brings back
+   * ids minted while anonymous under an identity that does not own them.
+   *
+   * A reload by the same identity therefore matches and changes nothing, which
+   * is what keeps a refresh mid-conversation in that conversation.
+   */
+  const identity = auth.ready ? (auth.userId ?? "anonymous") : null;
+  useEffect(() => {
+    if (identity === null) return;
+    if (readLive(SESSION_OWNER_KEY) === identity) return;
+    writeLive(SESSION_OWNER_KEY, identity);
+    setSessionIds({ chat: crypto.randomUUID(), code: crypto.randomUUID() });
+    setContextFace("pulse");
+    setContextOpen(false);
+    setFlyoutOpen(false);
+  }, [identity]);
 
   // The section is persisted by the handler that changes it, not by an effect
   // watching it. An effect would fire once on mount with the *initial* value
@@ -243,6 +354,98 @@ export default function Page() {
   useEffect(() => {
     fetchConfig().then(setConfig).catch(() => setConfig(null));
   }, []);
+
+  // Reconcile the *persisted* model picks against what this backend actually
+  // offers. `modelChoice` is restored from localStorage and outlives any
+  // change of server config, so a pick whose provider key has since been
+  // removed (or a model that has been retired) stays selected forever: the
+  // selector renders a raw id it cannot find a display name for, and every
+  // turn silently runs on something else because the backend resolves past it.
+  // Reset those sections to the backend's default and leave valid picks —
+  // and the Auto sentinel, which is a mode rather than a model — untouched.
+  /**
+   * Read the account's default model whenever the identity changes.
+   *
+   * Anonymous callers get `null` back from the server rather than a shared
+   * row: an anonymous session is per-device by definition, and pooling those
+   * preferences would let one browser change another's.
+   */
+  useEffect(() => {
+    if (!auth.ready) return;
+    let live = true;
+    fetchPreferences(auth.token)
+      .then((p) => {
+        if (live) setAccountModel(p.default_model_id ?? null);
+      })
+      .catch(() => {
+        if (live) setAccountModel(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [auth.ready, auth.token]);
+
+  /**
+   * Apply the account preference across every section, once per identity.
+   *
+   * Sections the user has touched *on this screen* are left alone — a
+   * preference is a starting point, not an override of a live decision. A
+   * section they merely have a stale localStorage value for is not protected,
+   * because the account is meant to be the more authoritative of the two.
+   */
+  useEffect(() => {
+    if (accountModel === undefined) return;
+    if (appliedPrefFor.current === auth.token) return;
+    appliedPrefFor.current = auth.token;
+    if (!accountModel) return;
+    // `null` is Auto in this state; the server stores it as the string "auto".
+    const pick = accountModel === AUTO_MODEL_ID ? null : accountModel;
+    setModelChoice((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const key of Object.keys(next) as Section[]) {
+        if (touchedThisLoad.current[key]) continue;
+        if (next[key] === pick) continue;
+        next[key] = pick;
+        touchedModel.current[key] = true;
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [accountModel, auth.token]);
+
+  useEffect(() => {
+    if (!config) return;
+    const offered = new Set(config.models.map((m) => m.id));
+    setModelChoice((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const key of Object.keys(next) as Section[]) {
+        const pick = next[key];
+        if (pick === null || pick === AUTO_MODEL_ID) continue;
+        if (!offered.has(pick)) {
+          // The pick names a model this backend does not serve — a retired id,
+          // or one whose provider key has been removed since it was stored.
+          // Reset to the section's default rather than leaving the selector
+          // showing an id it cannot name.
+          next[key] = defaultModelFor(key, config);
+          changed = true;
+          continue;
+        }
+        // A valid pick the user never made is still only a placeholder: it is
+        // whatever this bundle guessed before config answered. The backend's
+        // per-section default is the better answer, so adopt it.
+        if (!touchedModel.current[key]) {
+          const preferred = defaultModelFor(key, config);
+          if (preferred !== pick && offered.has(preferred)) {
+            next[key] = preferred;
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [config]);
 
   // Scoped to the active surface. This is the query half of the section fix:
   // Chat asks for Chat's sessions and Code asks for Code's, so neither list can
@@ -329,7 +532,15 @@ export default function Page() {
   }, [state.connected]);
 
   const chooseModel = useCallback(
-    (id: string | null) => setModelChoice((prev) => ({ ...prev, [section]: id })),
+    (id: string | null) => {
+      // Record that this section's model is now the user's, not a default.
+      // The config-reconciliation effect reads this and stops substituting.
+      touchedModel.current[section] = true;
+      // And that it happened *on this screen*, which is what protects it from
+      // the account preference landing a moment later and replacing it.
+      touchedThisLoad.current[section] = true;
+      setModelChoice((prev) => ({ ...prev, [section]: id }));
+    },
     [section],
   );
 
@@ -724,12 +935,33 @@ export default function Page() {
 
       if (e.key === "Escape") {
         // Deepest surface first, so one press never closes two things.
-        if (paletteOpen || renameOpen) return; // each dialog handles its own
+        if (paletteOpen || renameOpen || settingsOpen || shortcutsOpen) return;
         if (contextOpen) {
           setContextOpen(false);
           return;
         }
-        if (flyoutOpen) setFlyoutOpen(false);
+        if (flyoutOpen) {
+          setFlyoutOpen(false);
+          return;
+        }
+        // Nothing left to close, so Escape means the other thing it means
+        // everywhere else: stop what is happening. Last in the chain rather
+        // than first — a panel open over a streaming answer should close on
+        // the first press, not silently kill the generation behind it.
+        //
+        // This is deliberately allowed while the composer has focus, unlike
+        // every other binding here. Stopping a runaway answer is the one
+        // action you want *most* when your hands are already on the keys.
+        if (busy) cancel();
+        return;
+      }
+
+      // The shortcuts reference. `?` is the near-universal binding for it, and
+      // it needs no modifier because the `typing` guard below already keeps it
+      // out of the composer's way.
+      if (e.key === "?" && !typing && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        setShortcutsOpen((o) => !o);
         return;
       }
 
@@ -752,7 +984,18 @@ export default function Page() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [paletteOpen, renameOpen, contextOpen, flyoutOpen, section, newSession]);
+  }, [
+    paletteOpen,
+    renameOpen,
+    settingsOpen,
+    shortcutsOpen,
+    contextOpen,
+    flyoutOpen,
+    section,
+    newSession,
+    busy,
+    cancel,
+  ]);
 
   const activeFile = state.activeFile
     ? state.changed[state.activeFile] ?? state.viewed[state.activeFile] ?? null
@@ -806,6 +1049,21 @@ export default function Page() {
         keywords: "rename title describe description",
         disabled: !sessionId,
         run: () => openRename(sessionId ?? undefined),
+      },
+      {
+        id: "app.settings",
+        group: "Session",
+        label: "Settings",
+        keywords: "account sign out log out logout preferences profile model theme",
+        run: () => setSettingsOpen(true),
+      },
+      {
+        id: "app.shortcuts",
+        group: "Session",
+        label: "Keyboard shortcuts",
+        hint: "?",
+        keywords: "keys bindings help hotkeys reference",
+        run: () => setShortcutsOpen(true),
       },
       {
         id: "session.list",
@@ -983,10 +1241,54 @@ export default function Page() {
   };
 
   return (
-    <div data-section={section} className="relative flex h-dvh overflow-hidden">
+    <div
+      data-section={section}
+      className="relative flex h-dvh overflow-hidden"
+      style={{
+        // `dvh` already tracks collapsing browser chrome; this is the keyboard,
+        // which on iOS it does not. Taking it off the height (rather than
+        // padding the bottom) keeps the composer's own sticky positioning
+        // correct instead of pushing it into a padded strip.
+        height: "calc(100dvh - var(--kb-inset, 0px))",
+        paddingLeft: "env(safe-area-inset-left)",
+        paddingRight: "env(safe-area-inset-right)",
+      }}
+    >
       <AmbientField status={state.status} />
 
       <CodeIntro playing={introPlaying} onDismiss={dismissIntro} />
+
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        auth={auth}
+        config={config}
+        onOpenShortcuts={() => {
+          // One panel at a time. Settings is where the reference is
+          // *discovered*; `?` is how it is reached once you know it exists.
+          setSettingsOpen(false);
+          setShortcutsOpen(true);
+        }}
+      />
+
+      <ShortcutsDialog
+        open={shortcutsOpen}
+        onClose={() => setShortcutsOpen(false)}
+        section={section}
+      />
+
+      {/* Only after an explicit sign-out — never merely because nobody has
+          signed in. See `lib/useAuth` for why those are different questions.
+          The anonymous escape is offered exactly when the backend will accept
+          an anonymous caller, so a deployment with REQUIRE_AUTH=1 gets a wall
+          and a local one does not. */}
+      {auth.ready && auth.signedOut && (
+        <AuthScreen
+          onContinueAnonymous={
+            config?.require_auth ? undefined : auth.continueAnonymously
+          }
+        />
+      )}
 
       {/* Model switches announce themselves here rather than on the thread.
           Mounted at the layout root so the one card is shared by every
@@ -1075,7 +1377,11 @@ export default function Page() {
         )}
 
         <div className="mt-auto w-full">
-          <AuthPanel onToken={setToken} rail />
+          <AuthPanel
+            auth={auth}
+            onOpenSettings={() => setSettingsOpen(true)}
+            rail
+          />
         </div>
       </nav>
 
@@ -1088,7 +1394,11 @@ export default function Page() {
             animate={{ opacity: 1, x: 0 }}
             exit={motionOK ? { opacity: 0, x: -16 } : { opacity: 0 }}
             transition={motionOK ? SPRING_SNAP : { duration: 0 }}
-            className="glass fixed inset-y-3 left-[80px] z-40 w-[272px] overflow-hidden rounded-panel sm:left-[80px]"
+            // On a phone this took a fixed 272px and left a useless 39px
+            // strip of conversation beside it. It now fills the width the rail
+            // is not using, and keeps its measured column from `sm` up.
+            className="glass fixed inset-y-3 left-[80px] right-3 z-40 overflow-hidden rounded-panel
+                       sm:right-auto sm:w-[272px]"
           >
             <SessionSidebar
               sessions={sessions}
@@ -1099,6 +1409,8 @@ export default function Page() {
               onNewSession={newSession}
               onSessionAction={sessionAction}
               onClose={() => setFlyoutOpen(false)}
+              token={token}
+              section={convSection}
             />
           </motion.aside>
         )}
@@ -1111,7 +1423,7 @@ export default function Page() {
             type="button"
             onClick={() => setRailOpen(true)}
             aria-label="Open navigation"
-            className="grid h-[34px] w-[34px] place-items-center rounded-ctl text-ink-muted
+            className="grid h-11 w-11 place-items-center rounded-ctl text-ink-muted
                        transition-colors duration-200 hover:bg-elevated hover:text-ink sm:hidden"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round">
@@ -1171,7 +1483,7 @@ export default function Page() {
                 onClick={() => setContextOpen((o) => !o)}
                 aria-label="Toggle context panel"
                 className={cn(
-                  "grid h-[34px] w-[34px] place-items-center rounded-ctl text-ink-faint",
+                  "grid h-[34px] w-[34px] touch:h-11 touch:w-11 place-items-center rounded-ctl text-ink-faint",
                   "transition-colors duration-200 hover:bg-elevated hover:text-ink xl:hidden",
                   contextOpen && "bg-elevated text-ink",
                 )}
@@ -1185,7 +1497,7 @@ export default function Page() {
           </div>
         </header>
 
-        {config && !config.xai && <SetupBanner config={config} />}
+        {config && <SetupBanner config={config} />}
 
         {/* The other half of the intro hand-off. While the veil is up this is
             held at zero; as it lifts, the interface fades in behind it on a
@@ -1224,6 +1536,9 @@ export default function Page() {
               busy={busy}
               onSend={send}
               onCancel={cancel}
+              onEditMessage={editMessage}
+              onRegenerate={regenerate}
+              onSwitchBranch={switchBranch}
               models={config?.models ?? []}
               modelChoice={modelChoice[section]}
               autoTargetId={autoTargetId}
@@ -1340,7 +1655,7 @@ function ExportButton({ busy, onClick }: { busy: boolean; onClick: () => void })
       aria-label="Download the project as a zip"
       title="Download project (.zip)"
       className={cn(
-        "grid h-[34px] w-[34px] place-items-center rounded-ctl text-ink-faint",
+        "grid h-[34px] w-[34px] touch:h-11 touch:w-11 place-items-center rounded-ctl text-ink-faint",
         "transition-colors duration-200 hover:bg-elevated hover:text-ink",
         "disabled:pointer-events-none",
       )}
@@ -1411,6 +1726,7 @@ function RailButton({
       aria-label={label}
       className={cn(
         "grid h-10 w-10 shrink-0 place-items-center rounded-ctl transition-all duration-200",
+        "touch:h-11 touch:w-11",
         "active:scale-[0.94]",
         active
           ? "bg-raised text-ink"
@@ -1422,20 +1738,41 @@ function RailButton({
   );
 }
 
+/**
+ * What an unset provider key actually costs the user, in the order it matters.
+ *
+ * This once said "copy .env.example and restart" for a missing key, which read
+ * as "the app is broken" when it is not: the backend resolves past an unkeyed
+ * model to one it can run, so a missing key costs you those models and nothing
+ * else. Naming the consequence rather than the remedy keeps the banner honest
+ * — and lets a genuinely disabling absence (no sandbox, no web search) say so
+ * in the same place.
+ *
+ * `OPENCODE_API_KEY` leads because it is the one whose absence changes how the
+ * app behaves rather than just shortening a list: it holds the default model
+ * *and* the whole Auto pool, so without it Auto stops routing by task and
+ * degrades to the per-section table.
+ */
 function SetupBanner({ config }: { config: BackendConfig }) {
-  const missing = [
-    !config.xai && "XAI_API_KEY",
-    !config.e2b && "E2B_API_KEY",
-    !config.exa && "EXA_API_KEY",
+  const fallback =
+    config.models.find((m) => m.id === config.default_model_id)?.name ??
+    config.default_model_id;
+
+  const notes = [
+    !config.opencode &&
+      `Task-based Auto routing is off (OPENCODE_API_KEY unset) — sessions use ${fallback} and Auto falls back to per-section routing.`,
+    !config.e2b && "The Code sandbox is unavailable (E2B_API_KEY unset).",
+    !config.exa && "Web search is unavailable (EXA_API_KEY unset).",
   ].filter(Boolean) as string[];
+
+  if (notes.length === 0) return null;
 
   return (
     <div className="mx-5 mb-1 shrink-0 rounded-ctl border border-warn/25 bg-[rgba(240,181,74,0.08)] sm:mx-7">
       <p className="px-3.5 py-2 text-xs text-warn">
-        Backend is missing {missing.join(", ")}. Copy{" "}
-        <code className="font-mono">backend/.env.example</code> to{" "}
-        <code className="font-mono">backend/.env</code>, fill it in, and restart the
-        server.
+        {notes.join(" ")} Add the key to{" "}
+        <code className="font-mono">backend/.env</code> and restart the server to
+        enable it.
       </p>
     </div>
   );

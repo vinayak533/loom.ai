@@ -1,6 +1,6 @@
 /**
  * The browser talks to exactly one backend: our FastAPI service. It never
- * holds an xAI / OpenRouter / E2B / Exa key — those live server-side.
+ * holds an OpenCode / OpenRouter / Groq / E2B / Exa key — those live server-side.
  */
 
 import type { FileNode, GitChange, GitCommit } from "./events";
@@ -71,7 +71,41 @@ export const AUTO_MODEL_ID = "auto";
  * value used until it does, so the selector never renders empty. Keep the two
  * in step: this is `DEFAULT_MODEL_ID` in backend/app/config.py.
  */
-export const DEFAULT_MODEL_ID = "grok-4-5";
+export const DEFAULT_MODEL_ID = "qwen3_7_plus";
+
+/**
+ * What each section opens on, before `/api/config` has answered.
+ *
+ * The sections do different work and open on different models: Code on MiMo
+ * V2.5 (long-horizon coding, and it reads images), Chat on DeepSeek V4 Flash
+ * (fastest and cheapest — what a conversational surface should start on),
+ * Learn on MiMo V2.5 to match the tutor's own preference order. Agents keeps
+ * its per-specialist selection and only needs a placeholder here.
+ *
+ * Same contract as `DEFAULT_MODEL_ID` above: this is the pre-config value, and
+ * `config.default_model_ids` — already resolved server-side to models this
+ * deployment can actually reach — takes over the moment it lands. Keep in step
+ * with `DEFAULT_MODEL_*` in backend/app/config.py.
+ */
+export const SECTION_DEFAULT_MODEL_ID: Record<string, string> = {
+  chat: "deepseek_v4_flash",
+  code: "mimo_v2_5",
+  learning: "mimo_v2_5",
+  agents: DEFAULT_MODEL_ID,
+};
+
+/** The section's opening model, preferring what the backend reports. */
+export function defaultModelFor(
+  section: string,
+  config?: { default_model_ids?: Record<string, string>; default_model_id?: string } | null,
+): string {
+  return (
+    config?.default_model_ids?.[section] ||
+    SECTION_DEFAULT_MODEL_ID[section] ||
+    config?.default_model_id ||
+    DEFAULT_MODEL_ID
+  );
+}
 
 export type ModelOption = {
   id: string;
@@ -93,17 +127,26 @@ export type ModelOption = {
 export type BackendConfig = {
   openrouter: boolean;
   groq: boolean;
-  xai: boolean;
   opencode: boolean;
   e2b: boolean;
   exa: boolean;
   supabase: boolean;
   model: string;
   default_model_id: string;
+  /**
+   * section → the model a new session in that section opens on, already
+   * resolved server-side to something this deployment has a key for.
+   */
+  default_model_ids: Record<string, string>;
   /** section → model_id. Auto's fallback table when task routing is off. */
   auto_routes: Record<string, string>;
   /** True when Auto routes by task rather than by section. */
   auto_task_routing: boolean;
+  /**
+   * Whether the backend rejects an anonymous caller. Decides whether the
+   * post-sign-out screen offers a way back in without an account.
+   */
+  require_auth: boolean;
   max_iterations: number;
   models: ModelOption[];
 };
@@ -538,6 +581,80 @@ export async function addYouTubeSource(
   );
 }
 
+/**
+ * Upload one file, reporting progress and cancellable.
+ *
+ * `fetch` cannot do either half of that: it has no upload-progress event, and
+ * aborting it mid-body is unreliable across browsers. So this is XHR — the
+ * only API in the platform that will tell you how many bytes have actually
+ * gone out. Without it a progress bar can only be a lie or a spinner, and a
+ * user who picked the wrong 40 MB PDF has no way to take it back.
+ *
+ * `onProgress` receives 0–1, and is only called while the length is
+ * computable; a chunked request reports nothing rather than inventing a
+ * number, which the chip renders as an indeterminate state.
+ */
+export function uploadFileTracked(
+  sessionId: string,
+  file: File,
+  token?: string | null,
+  opts: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+): Promise<UploadedFile> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const body = new FormData();
+    body.append("session_id", sessionId);
+    body.append("file", file);
+
+    xhr.open("POST", `${HTTP_BASE}/api/upload`);
+    for (const [k, v] of Object.entries(authHeaders(token))) {
+      xhr.setRequestHeader(k, v as string);
+    }
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && opts.onProgress) {
+        opts.onProgress(e.loaded / e.total);
+      }
+    };
+    xhr.onload = () => {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(xhr.responseText);
+      } catch {
+        /* handled below */
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && parsed) {
+        opts.onProgress?.(1);
+        resolve(parsed as UploadedFile);
+        return;
+      }
+      const detail =
+        (parsed as { detail?: string } | null)?.detail ??
+        `Upload failed (${xhr.status})`;
+      reject(new Error(detail));
+    };
+    xhr.onerror = () => reject(new Error("Upload failed — the request did not complete."));
+    xhr.ontimeout = () => reject(new Error("Upload timed out."));
+    // A cancel is a user decision, not a failure. The caller tells the two
+    // apart by the error's name, exactly as it would with `fetch`.
+    xhr.onabort = () => {
+      const err = new Error("Upload cancelled.");
+      err.name = "AbortError";
+      reject(err);
+    };
+
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        xhr.abort();
+        return;
+      }
+      opts.signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    }
+
+    xhr.send(body);
+  });
+}
+
 export async function uploadFile(
   sessionId: string,
   file: File,
@@ -551,6 +668,129 @@ export async function uploadFile(
       method: "POST",
       headers: authHeaders(token),
       body,
+    }),
+  );
+}
+
+/**
+ * A session that matched a search, and how.
+ *
+ * `match` distinguishes a title hit from a hit somewhere in the transcript,
+ * which is what lets the list explain itself — a row whose title has nothing
+ * to do with the query is baffling until you can see the line that matched.
+ */
+export type SessionSearchHit = SessionRow & {
+  match: "title" | "message";
+  /** The matched phrase with a little context. Null for a title match. */
+  snippet: string | null;
+};
+
+/**
+ * Search a section's history by title and by message content.
+ *
+ * A database query, not a generative one — two indexed `ilike` scans on the
+ * server. Callers debounce; this does not, because a hook that owns the timer
+ * can also cancel it, and one buried in a fetch helper cannot.
+ *
+ * An empty query returns `[]` without a request. The server would answer the
+ * same way, but not making the call at all is what keeps a cleared input from
+ * putting a round trip on the wire for a question with no answer.
+ */
+export async function searchSessions(
+  query: string,
+  token?: string | null,
+  section: "chat" | "code" = "chat",
+  options: { agentId?: string | null; signal?: AbortSignal } = {},
+): Promise<SessionSearchHit[]> {
+  const q = query.trim();
+  if (!q) return [];
+  const search = new URLSearchParams({ q });
+  if (options.agentId) search.set("agent_id", options.agentId);
+  else search.set("section", section);
+  return json(
+    await fetch(`${HTTP_BASE}/api/sessions/search?${search}`, {
+      headers: authHeaders(token),
+      cache: "no-store",
+      signal: options.signal,
+    }),
+  );
+}
+
+/** One person's thumbs on one session, keyed by assistant-turn ordinal. */
+export type FeedbackRow = {
+  turn_index: number;
+  rating: "up" | "down";
+  reason?: string | null;
+};
+
+export async function fetchFeedback(
+  sessionId: string,
+  token?: string | null,
+): Promise<FeedbackRow[]> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/feedback`, {
+      headers: authHeaders(token),
+      cache: "no-store",
+    }),
+  );
+}
+
+/** Record a verdict, or pass `rating: null` to withdraw one. */
+export async function sendFeedback(
+  sessionId: string,
+  turnIndex: number,
+  rating: "up" | "down" | null,
+  token?: string | null,
+  extra: { reason?: string; modelId?: string | null; section?: string } = {},
+): Promise<void> {
+  await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders(token) },
+    body: JSON.stringify({
+      turn_index: turnIndex,
+      rating,
+      reason: extra.reason,
+      model_id: extra.modelId,
+      section: extra.section,
+    }),
+  });
+}
+
+/**
+ * Preferences that follow the account rather than the browser.
+ *
+ * `default_model_id` is null when the user has never chosen one, which is not
+ * the same as choosing whatever the current default happens to be: someone who
+ * has expressed no preference should follow the build's default when it moves,
+ * and someone who has should not.
+ */
+export type Preferences = {
+  user_id: string | null;
+  default_model_id: string | null;
+  theme: string;
+};
+
+export async function fetchPreferences(
+  token?: string | null,
+): Promise<Preferences> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/preferences`, {
+      headers: authHeaders(token),
+      cache: "no-store",
+    }),
+  );
+}
+
+/** Save preferences. Requires a signed-in account; the server rejects otherwise. */
+export async function savePreferences(
+  patch: { default_model_id?: string | null; theme?: string },
+  token?: string | null,
+): Promise<Preferences> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/preferences`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
+      body: JSON.stringify(patch),
     }),
   );
 }

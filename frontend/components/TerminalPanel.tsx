@@ -59,12 +59,12 @@ export const TerminalPanel = memo(function TerminalPanel({
       className="relative z-10 shrink-0 overflow-hidden border-t border-line bg-inset"
       style={{ backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)" }}
     >
-      <header className="flex h-10 items-center gap-3 px-4">
+      <header className="flex h-10 touch:h-12 items-center gap-3 px-4">
         <button
           type="button"
           onClick={onToggle}
           aria-expanded={open}
-          className="group flex items-center gap-2 text-ink-muted transition-colors hover:text-ink"
+          className="group flex h-full min-w-[44px] items-center gap-2 text-ink-muted transition-colors hover:text-ink"
         >
           <motion.span
             animate={{ rotate: open ? 90 : 0 }}
