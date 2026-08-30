@@ -11,7 +11,7 @@ design system — and behaving like three different tools, because they are.
 
 ```
 frontend/   Next.js 14 (App Router) · TypeScript · Tailwind · Framer Motion   → Vercel
-backend/    FastAPI · LangGraph · xAI · OpenRouter · E2B · Exa                → Render
+backend/    FastAPI · LangGraph · OpenCode · OpenRouter · Groq · E2B · Exa    → Render
             Supabase: Postgres + Auth + Storage + pgvector
 ```
 
@@ -73,8 +73,26 @@ animation system is a pure function of these event types:
 | `preview_error` | error banner over the frame (`fatal: false`) or the stopped state (`true`) |
 | `preview_stopped` | preview closes; `reason: "absent"` is the connect-time reconcile |
 | `usage` / `agent_done` / `max_iterations` / `error` | status chips and notices |
+| `branches` | draws the `‹ 1/2 ›` switcher on any user turn that has been edited |
+| `history_replaced` | the conversation on the server is no longer the one on screen |
 
 Change a `type` in one file and you must change it in the other.
+
+`history_replaced` carries the turn that was cut and the text replacing it,
+and that is not redundancy. The obvious design — "the history changed, go and
+fetch it" — is a race the client loses: an edit truncates the checkpoint and
+*immediately* starts the re-run, so a fetch issued on that frame reads a
+checkpoint mid-rewrite and comes back either empty or still holding the turns
+just removed. Both were observed during this work; the second is worse, because
+the new reply then streams in underneath the old one and the thread shows the
+question twice. Naming the cut lets the client truncate its own transcript at
+the same place. A *branch switch* has no run to race, so it omits both fields
+and the client does refetch — that path replaces an arbitrary suffix, which is
+not expressible as a truncation.
+
+Client frames added alongside them: `edit_message`, `regenerate` and
+`switch_branch`. `cancel` is unchanged on the wire but no longer means "tear
+the run down" — see **Stopping a generation**.
 
 ---
 
@@ -197,11 +215,18 @@ that no longer exists, and could save an edit back to it.
 | `⌘\` / `Ctrl+\` | Context column (below `xl`, where it floats) |
 | `⌘⇧O` / `Ctrl+Shift+O` | New session |
 | `⌘S` / `Ctrl+S` | Save, inside the inline editor |
-| `Esc` | Closes the topmost surface only |
+| `?` | Keyboard shortcuts panel |
+| `Esc` | Closes the topmost surface — or, with nothing left to close, stops a streaming reply |
 
 The global layer never fires while the user is typing (the palette and `Esc`
 excepted — they are how you leave a field) and never fires in Learn, which is
 not a session and has none of these surfaces.
+
+`Esc` is last in its own chain deliberately: a panel open over a streaming
+answer closes on the first press rather than silently killing the generation
+behind it. Only when nothing is left to close does it stop the run. The panel
+that lists all of this is `?`, and every line in it is a binding that really
+works — see **Keyboard shortcuts panel** below.
 
 ---
 
@@ -229,6 +254,239 @@ list, so Chat and Code cannot drift apart about what "most recent" means.
 run `schema.sql` again to add them to an existing database (every statement in
 it is idempotent). Until you do, a rename still saves its title — the
 description is dropped by a deliberate fallback rather than failing the write.
+
+### Message actions: copy, edit, regenerate
+
+Every message in Chat, Code and Agents carries a row of controls that appears
+on hover and takes no layout — a transcript is something you read, and a
+permanent row of buttons under every paragraph turns it into a form. They stay
+in the DOM and stay focusable, so they are reachable by keyboard and to a
+screen reader rather than being hover-only.
+
+| Control | Where | What it does |
+|---|---|---|
+| Copy | Every message | Clipboard, with a tick for confirmation. Falls back to the `execCommand` path on an insecure origin, where `navigator.clipboard` throws. |
+| Edit | User messages | Opens the message in place; `⏎` saves, `Esc` cancels. Saving re-runs the conversation from that point. |
+| Regenerate | The most recent reply | Re-runs the last turn on **whichever model is selected now**, which need not be the one that answered the first time. |
+| 👍 / 👎 | Assistant messages | Records a verdict. Pressing the thumb you already chose withdraws it. |
+
+Regenerate is deliberately offered on the last reply only. Re-running an
+earlier one is the same operation as editing the message above it without
+changing the text, and offering it separately would be a second door onto one
+room — with the added cost of silently discarding everything after it.
+
+---
+
+### Conversation branching
+
+**An edit forks; it never overwrites.** Send a different version of your third
+message and the conversation re-runs from there, but the replies the original
+produced stay reachable behind a `‹ 1/2 ›` control on that message. Regenerate
+does the same thing to a reply, so the answer you liked better is never one
+click from being gone.
+
+The data model was a real decision, and it is written up at length on
+`public.message_branches` in `schema.sql`. The short version:
+
+> A branch is the whole conversation **from turn N onwards**, stored as one row.
+
+The alternative — a tree keyed by parent message — is more general and a worse
+fit here. Nothing in this system has a per-message identity to *be* a parent:
+what the agent reads is `AgentState["messages"]`, a flat list inside a LangGraph
+checkpoint, and the rows in `public.messages` are an append-only log no reader
+ever joins on. A tree would have meant minting stable ids in two stores and
+keeping them in step. Versioned suffixes need neither: the checkpoint stays the
+single live source of truth, and switching branches splices a stored suffix
+back into it.
+
+That last point is what makes the feature more than cosmetic. Switching
+branches does not merely redraw the transcript — it puts the model back in the
+state that branch left it in, so the next turn continues the branch you are
+actually looking at. `scripts/test_message_actions.py` asserts exactly this by
+reading the checkpoint back after a switch.
+
+Turns are numbered by **user turn**, never by position in the messages array: a
+`tool_result` carrier has `role == "user"` too, so array indices would shift the
+moment a turn used a tool. `repository.user_turn_positions` and the client's own
+count of `kind === "user"` rows are the same number by construction, which is
+how both ends agree without exchanging ids.
+
+`is_active` marks which version is spliced in. It is stored rather than
+inferred, because on a cold page load the only evidence is the live
+conversation itself, and comparing snapshots to guess would be expensive and
+wrong the moment two versions began with the same message.
+
+---
+
+### Stopping a generation
+
+The Stop control replaces Send while a reply is streaming, and `Esc` does the
+same thing from the keyboard. What happens next is the interesting part.
+
+A stop used to be `run_task.cancel()`, which is abrupt in three ways that all
+matter:
+
+* the partial answer already on screen was **thrown away** — it lived only in
+  the local variables of a node that raised, and LangGraph does not checkpoint
+  a node that raised;
+* the tokens the provider had already produced were **never billed**, because
+  the charge happens after the stream completes;
+* a stop landing mid-tool-call left a `tool_use` block with **no matching
+  `tool_result`**, which the provider rejects on the *next* turn — so the
+  session was dead and the symptom appeared a long way from the cause.
+
+So a stop is now a *request* rather than an interrupt (`app/cancel.py`). The
+socket sets a flag; the graph reads it at the points where stopping is safe —
+between stream frames and between tool calls — and then finishes the turn
+normally:
+
+* partial text and reasoning are appended to the conversation as a real
+  assistant turn, marked `*(Stopped by the user.)*`, so a reload still shows it;
+* a tool already running is **allowed to finish** — half a `file_write` cannot
+  be undone, and one extra second beats a corrupt sandbox — while calls that
+  never started are closed with a result, so nothing is orphaned;
+* the turn is billed for the output actually generated, estimated from the
+  streamed characters (`app/turnstop.py`) and recorded as an estimate. The
+  provider only reports `usage` on a frame a stopped stream never receives, so
+  the choice is between estimating and billing zero — and billing zero would
+  make Stop a way to use the product free;
+* the run ends with `agent_done.reason == "cancelled"`, not an error.
+
+`scripts/test_stop_tools_credits.py` proves the tool case the only way worth
+proving it: it stops mid-batch, checks every `tool_use` in the checkpoint has a
+result, and then **sends another turn on the same session** — which a
+conversation with an orphaned call cannot survive.
+
+---
+
+### History search
+
+The sessions flyout has a search box over the current section's history. It
+matches session titles *and message bodies*, and a body hit carries the line
+that matched, because a row whose title has nothing to do with your query is
+baffling until you can see why it is there.
+
+It is a database query and nothing else: two indexed `ilike` scans and a merge
+(`repository.search_sessions`). No model is in the path — a search box that
+waits on a generative call is both slower and worse than one that does not.
+The input debounces at 200ms and aborts every superseded request, so results
+for "auth" cannot land after results for "authentication" and overwrite them.
+
+Chat and Code search separately, matching their separate history lists.
+Cross-section search is not implemented.
+
+---
+
+### Keyboard shortcuts panel
+
+`?` opens a reference sheet, also reachable from Settings. One rule governs its
+content: **every line in it is a binding that actually works.** A shortcuts
+sheet is a promise, and one listing a key that does nothing teaches something
+false and then makes the reader doubt the rest. It is a static list, so
+`components/ShortcutsDialog.tsx` has to be edited when a binding is added — the
+comment above the table says so.
+
+---
+
+### Settings
+
+`SettingsDialog` has three groups:
+
+* **Account** — who you are, what the session covers, and sign-out.
+* **Preferences** — the default model, and the theme statement.
+* **This build** — read-outs: which models are configured, how Auto routes,
+  whether the sandbox is wired up.
+
+The default model is stored **against the account**, not in `localStorage`
+(`public.user_preferences`), which is the point: signing in on a second device
+used to silently reset a choice made on the first — the one thing an account is
+supposed to prevent. "No preference" stays distinguishable from "chose the
+current default", so a user who never picked one follows the build's default
+when it moves and a user who did does not.
+
+On theme, the panel now says the thing rather than leaving it ambiguous: Loom
+ships a single true-black theme, there is no light mode, and none is planned.
+The `theme` column exists so that is a value in the data rather than an
+assumption baked into the absence of one.
+
+---
+
+### Response feedback
+
+👍 / 👎 on assistant replies, stored in `public.message_feedback`. Deliberately
+inert: nothing reads it back, no model is retrained, no answer changes. It is a
+record kept so that "which model and which route produce answers people
+actually like" can one day be asked against real data instead of reconstructed
+from nothing.
+
+One verdict per person per turn, revisable and withdrawable. Two people looking
+at the same transcript are entitled to disagree, and a control showing somebody
+else's verdict as yours is simply wrong.
+
+---
+
+### Attachment previews
+
+Composer chips show a real thumbnail for images and for PDFs whose first page
+is a raster — which is what a scanned document is. A chip reading
+`report.pdf · PDF` tells you what you already knew when you picked the file;
+the first page tells you whether it is the *right* report.
+
+`lib/thumbnail.ts` does this without `pdfjs-dist`, and is explicit about the
+trade: that library renders any PDF perfectly and costs ~350 KB plus a worker,
+which is a real price for a 30-pixel square. Instead it scans for a
+`/DCTDecode` stream and hands the embedded JPEG to the browser's own decoder. A
+vector-only PDF — a LaTeX paper, a clean export — has no raster to find, so it
+returns null and the chip keeps its type icon. The feature degrades to exactly
+what was there before rather than to something broken. Everything runs locally
+on the chosen file, before any upload.
+
+---
+
+### Empty states
+
+Chat, Code and Learn each open on something usable rather than a blank
+composer, at the bar the Agents gallery already set.
+
+* **Chat** — four starters, each with the reason it is there.
+* **Code** — the same, plus **Open a folder**, which *does* the thing rather
+  than describing it: it reaches into the import pipeline the composer's `+`
+  already owns.
+* **Learn** — a first-run notebook library now points at the ten authored
+  courses sitting one tab away, because someone opening Learn for the first
+  time has no PDFs to drop in and no reason to know the courses exist.
+
+`SECTION_META.suggestions` was removed rather than rewritten. The problem was
+not that they were the wrong strings: a starter needs a reason attached, and
+where a section has a real first action it needs to *be* that action — neither
+fits a `string[]`.
+
+---
+
+### One-time data cleanup
+
+`scripts/clean_session_debt.py` repairs rows left behind by two fixed bugs.
+Run it once against an existing database:
+
+```bash
+.venv/Scripts/python -m scripts.clean_session_debt          # report only
+.venv/Scripts/python -m scripts.clean_session_debt --apply  # write
+```
+
+It renames sessions whose title is the router's "the model produced no answer"
+sentence, or a reasoning model's monologue about the title prompt, or an entire
+markdown document — using the session's own first message, which is what the
+title should have been. It also scans `messages` for raw provider error
+payloads and redacts any it finds.
+
+On the database this was written against, that scan found **zero** rows across
+1,533 messages and 1,482 checkpoint entries: the 402 leak reached the socket as
+a transient `error` frame and returned without appending an assistant message,
+so it was rendered once and never written down. The scan stays in the script
+because that reasoning is only as good as its evidence, and this is how the
+evidence gets re-gathered on a database the author has not seen.
+
+---
 
 ### Learn
 
@@ -328,7 +586,7 @@ restart.
 
 ### Prerequisites
 
-Python 3.11+, Node 18+, and API keys for xAI and E2B at minimum.
+Python 3.11+, Node 18+, and API keys for OpenCode and E2B at minimum.
 
 ### 1. Backend
 
@@ -350,12 +608,11 @@ cp .env.example .env
 
 | Key | Required | What it does |
 |---|---|---|
-| `XAI_API_KEY` | **yes** | the agent's model (Grok 4.5, the default everywhere) |
+| `OPENCODE_API_KEY` | **yes** | the default model (Qwen 3.7 Plus) plus the 4 models Auto routes between, and a 5th selectable by hand |
 | `E2B_API_KEY` | **yes** | the sandbox the agent works in |
 | `EXA_API_KEY` | no | `web_search`; the tool reports an error without it |
 | `OPENROUTER_API_KEY` | no | 2 selectable models |
-| `GROQ_API_KEY` | no | 1 selectable model; also names sessions when present |
-| `OPENCODE_API_KEY` | no | the 4 models Auto routes between (see below) |
+| `GROQ_API_KEY` | no | 1 selectable model (GPT-OSS 120B); also names sessions when present |
 | `SUPABASE_*` | no | persistence, auth, uploads — the app degrades to in-memory |
 
 Run it:
@@ -373,8 +630,9 @@ key values).
 Every model call goes through `app/llm_router.py`. The selector in the composer
 offers two things:
 
-* **A specific model** — eight of them, across xAI, Groq, OpenRouter and
-  OpenCode. The session stays on it until you change it.
+* **A specific model** — eight of them, across Groq, OpenRouter and OpenCode.
+  The session stays on it until you change it, *unless* that model starts
+  failing — see "Automatic fallback" below.
 * **Auto (recommended)** — the router classifies each turn and picks for
   itself. `app/agent/task_classifier.py` reads the live graph state and returns
   one hint, in this priority order:
@@ -394,14 +652,78 @@ All the thresholds live in `app/config.py` as `AUTO_*` settings — retune them
 there rather than in the router. Without `OPENCODE_API_KEY`, startup logs an
 explicit error and Auto falls back to the per-section table (`AUTO_ROUTE_*`).
 
+### Automatic fallback
+
+A model that is *currently unusable* should not cost you your request. When a
+call fails for a reason that belongs to the provider, the router retries the
+same request against another model and tells you it did:
+
+> ⚠︎ Qwen 3.7 Plus hit a rate limit — switched to MiMo V2.5.
+
+* **Which failures qualify.** Rate limits and quota (429, and Groq's 413 TPM
+  refusal), transient server errors (5xx), and "model unavailable" (404).
+  Deliberately *not*: malformed requests (400/422), auth failures (401/403),
+  and content-policy refusals. Those will fail identically on the next model,
+  so retrying there would burn a second call and hide a real bug behind a model
+  switch.
+* **Where it goes.** Each registry entry declares a `fallback_chain`. Chains
+  lead with a *different provider*, because a 429 is usually provider-wide, and
+  a model that can read images falls back to another that can.
+* **How far.** At most `MAX_FALLBACK_ATTEMPTS` alternates (2), so three models
+  total. A systemic outage fails in bounded time instead of walking the
+  registry.
+* **A manual pick is not exempt.** You chose a model, but you asked a question;
+  finishing the request wins. The toast is how you find out.
+* **Never mid-answer.** Once a token has been streamed to you, the answer is
+  yours — a failure after that point is surfaced, not restarted, because
+  retrying would duplicate or truncate what you are already reading. In
+  practice nothing is lost: 429s and 503s happen at request time.
+* **You are billed once.** Credits are debited from reported usage after a
+  successful call, and a failed attempt produces none. The charge is priced
+  against the model that actually answered, not the one that refused.
+
+Every fallback logs one `llm_fallback` line with the model, the reason, the
+status code and where it went, so a model that fails often is visible in the
+logs rather than only in the toasts.
+
+Covered by `scripts/test_model_fallback.py` (mocked adapters, no live calls).
+
+### Refused vendors
+
+Removing a model from `MODEL_REGISTRY` is not on its own enough to make it
+unreachable. Every entry's wire id comes from settings — `OPENCODE_MODEL_FAST`,
+`GROQ_MODEL_A`, and so on — so one `.env` line can repoint an innocently-named
+entry at any model the upstream gateway happens to serve, and the gateways do
+serve models this app has deliberately dropped.
+
+`BANNED_MODEL_SUBSTRINGS` in `app/llm_router.py` closes that. It is checked in
+`is_available()`, which every selection and dispatch path already goes through,
+so a banned slug is:
+
+* hidden from the model selector,
+* refused at dispatch (with an error naming the real reason, not "add your
+  API key"),
+* skipped as an automatic-fallback target, and
+* reported as an error at startup, per offending entry.
+
+Matching is case-insensitive on substrings of the *resolved* wire id, so it
+targets a vendor rather than one version of one model. Add a vendor to the
+tuple to drop it; there is nothing else to change.
+
+Covered by `scripts/test_model_registry.py`, which repoints a live slot at a
+banned model and asserts every one of those routes closes.
+
 `token_usage` records `routing_mode` and `routing_hint` per call, so you can
 check afterwards whether Auto has been choosing sensibly.
 
-Routing tests:
+Routing, registry and fallback tests:
 
 ```bash
 cd backend
 .venv/Scripts/python scripts/test_task_routing.py       # offline, no keys
+.venv/Scripts/python scripts/test_model_registry.py     # offline, no keys
+.venv/Scripts/python scripts/test_model_fallback.py     # offline, mocked adapters
+.venv/Scripts/python scripts/test_live_models.py        # live, spends tokens
 .venv/Scripts/python scripts/test_opencode_models.py    # live, per model
 .venv/Scripts/python -m scripts.test_auto_routing_e2e   # live, through the graph
 ```
@@ -527,14 +849,16 @@ contents), median time-to-first-token for the next iteration went from **8.9s to
 5.0s**, and the spread narrowed from 4.6–22.0s to 3.4–5.1s — the whole
 transcript is served from cache instead of re-read.
 
-The one knob deliberately left alone is `XAI_MAX_TOKENS=16000`. It is the
+The one knob deliberately left alone is `OPENCODE_MAX_TOKENS=8000`. It is the
 single largest remaining lever on response time, and unlike everything above it
 is a real quality trade — turn it down only if you have decided you want
-shallower reasoning, not because you want a faster benchmark.
+shallower reasoning, not because you want a faster benchmark. (`GROQ_MAX_TOKENS`
+is *not* in that category: it must stay under Groq's tokens-per-minute cap, and
+at 8000 on the free tier every Groq call failed with a 413. See `.env.example`.)
 
 ## Security
 
-**The browser never holds a vendor key.** xAI, OpenRouter, E2B and Exa are
+**The browser never holds a vendor key.** OpenCode, OpenRouter, Groq, E2B and Exa are
 called only from `backend/`, and the only secret the frontend sees is the
 Supabase **anon** key — which is designed to be public and is gated by the RLS
 policies in `schema.sql`.
@@ -683,3 +1007,18 @@ frontend/
 * **Some chapter videos are YouTube *searches*, not embeds.** A pinned video id
   rots when a channel re-uploads or re-titles; where no canonical video is
   stable, the card opens a search instead so the link cannot break.
+* **A stopped turn's token count is an estimate.** The provider reports `usage`
+  only on the final frame, which a stopped stream never receives, so the charge
+  is derived from the characters actually streamed at four per token. The
+  alternative is billing nothing for output that was really produced.
+* **PDF thumbnails need an embedded raster.** A vector-only PDF falls back to
+  the type icon — see **Attachment previews** for why that is the trade rather
+  than the bug.
+* **History search is per section and literal.** Chat and Code search
+  separately, matching their separate history lists; there is no cross-section
+  search. Matching is substring, not fuzzy and not semantic.
+* **Response feedback feeds nothing.** It is captured and stored, and that is
+  all it does today.
+* **The account-level default model needs an account.** Anonymous sessions are
+  per-device by definition, so the control is disabled when signed out rather
+  than writing to a shared row.
