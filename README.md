@@ -829,6 +829,92 @@ yet — use the magic link below"* rather than offering a button that cannot wor
 
 ---
 
+## Projects and memory
+
+Two kinds of "remember this", deliberately kept apart, because they answer
+different questions and want different switches.
+
+A **project** is the scoped half. The user makes one on purpose, files sessions
+into it, and writes standing instructions that apply to those sessions and to
+nothing else. It can also hold knowledge files — PDFs and text the agent should
+treat as background. **Memory** is the unscoped half: two custom-instruction
+boxes and a table of learned facts that apply to every section, every session,
+which is exactly why it gets its own on/off control and its own audit list.
+
+Both end up as text in front of the system prompt, composed by
+`app/preamble.py` in one order and only one:
+
+```
+<the surface's own system prompt>      what the machinery is and how it works
+<per-account memory and instructions>  who this person is, how they want answers
+<the project's instructions and files> what this particular work needs
+```
+
+Least specific to most specific, so the narrower statement is read last. A
+project that says "answer in French" beats an account preference for English,
+because the project scope was set deliberately and more recently. The base
+prompt goes first because it describes the tools and the sandbox, and no user
+preference should be able to bury that.
+
+### The injection budget
+
+Knowledge files are uploads, so their size is whatever the user happened to
+attach. A 400 kB document would quietly consume the context window and push the
+actual conversation out of it, so there is a budget — and it is applied
+*before* any content is read. That is what `project_files.char_count` is for:
+the listing query returns the counts without the text, the budget is decided
+against those, and only the files that fit have their content fetched at all.
+
+Anything cut short says so, in the prompt, where the model can see it:
+
+```
+[... truncated: this file is longer than the space available ...]
+```
+
+A model that reads half a document and does not know it is reading half a
+document will answer confidently from the half it got. That is worse than not
+having the file, which is why the notice is not optional and why files left out
+entirely are counted in the block rather than silently dropped.
+
+### Learning
+
+After a turn, a cheap model reads the exchange and proposes durable facts.
+Three things make that safe enough to run without asking each time:
+
+* it is **charged like any other model call** — there is no free model call
+  anywhere in this project and this is not the first;
+* it never runs for an anonymous caller, who has no account to remember
+  against, and never when the switch is off;
+* it is **skipped for a stopped turn**. A cut-off exchange is the worst
+  possible source of a fact meant to persist.
+
+Extraction failure is never surfaced. A turn that produced a good answer is not
+a failed turn because the pass afterwards could not parse its own JSON, so
+everything in `app/memory.py` logs and returns rather than raising. The prompt
+that decides what counts as a fact is in that file and is written to be read —
+it is the whole of the boundary, so it should not need explaining elsewhere.
+
+The switch gates the *learned facts*, not the two instruction boxes. Turning
+memory off means "stop learning things about me", not "discard what I typed
+into Settings on purpose"; conflating those loses work the user did
+deliberately.
+
+### Scope, and what deleting means
+
+`sessions.project_id` is `on delete set null`, not cascade. Deleting a project
+keeps every conversation in it and leaves them unfiled. "Delete project" reads
+like it takes the conversations with it, so the confirmation spells the
+consequence out rather than just asking twice — a destructive action whose
+blast radius the user has guessed wrong is the one case where the second click
+has to say what it does.
+
+Projects work signed out, on the anonymous shelf, exactly as sessions do.
+Memory does not: the server refuses to store it without an account, because
+pooling it under a shared sentinel would let one browser's stated preferences
+steer another's answers.
+
+---
+
 ## Latency
 
 An agent turn is mostly waiting — on the model, on E2B, on Supabase — so the
@@ -950,6 +1036,9 @@ backend/
     db/
       repository.py       sessions, messages, files, token_usage
       learn_repository.py notebooks + course progress and exam attempts
+    projects.py           a project's instructions + knowledge -> prompt text
+    memory.py             per-account instructions, facts, and the learning pass
+    preamble.py           composes base + memory + project, in that order
     api/
       ws.py               /ws/{session_id}
       rest.py             /api/sessions, /api/upload, /api/config
@@ -967,6 +1056,8 @@ frontend/
     sections.ts           Chat / Learn / Code identity
     api.ts, learn.ts, supabase.ts
     courses.ts            course API client + the content/state cache split
+    projects.ts           projects, knowledge files, memory
+    useProjects.ts        project state, kept out of page.tsx
   components/
     SectionNav  SessionSidebar  SessionListItem  SessionHistoryMenu  AuthPanel
     ChatPanel  ToolCallCard  FileTree  DiffViewer  TerminalPanel
@@ -1019,6 +1110,17 @@ frontend/
   search. Matching is substring, not fuzzy and not semantic.
 * **Response feedback feeds nothing.** It is captured and stored, and that is
   all it does today.
+* **Project knowledge is injected whole, not retrieved.** Every ready file goes
+  into the prompt up to the budget, in the order they were added — there is no
+  relevance ranking, so a project with more knowledge than fits will always
+  drop the same files. Learn's notebooks do the retrieval version of this
+  (pgvector, `learn/retrieval.py`); a project deliberately does not, because
+  standing background is not the same shape of problem as a question.
+* **Duplicate memories are only caught on an exact match.** A rephrasing of a
+  fact already known is stored again. Near-duplicate detection needs
+  embeddings, and the failure mode of a slightly redundant list is much better
+  than the failure mode of a fuzzy match, which is silently dropping a real
+  new fact.
 * **The account-level default model needs an account.** Anonymous sessions are
   per-device by definition, so the control is disabled when signed out rather
   than writing to a shared row.
