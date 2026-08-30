@@ -504,10 +504,56 @@ async def git_tool(
                 )
                 body = f"{len(commits)} commit(s), newest first:\n{body}"
 
+        elif operation == "branch":
+            rows = await git.branches(session_id)
+            if not rows:
+                body = "No branches yet — the repository has no commits."
+            else:
+                body = "\n".join(
+                    f"  {'*' if b['current'] else ' '} {b['name']:<24} "
+                    f"{b['sha']}  {b['subject']}"
+                    for b in rows
+                )
+                body = f"{len(rows)} branch(es):\n{body}"
+
+        elif operation in ("checkout", "merge"):
+            name = (args.get("name") or "").strip()
+            if not name:
+                return ToolResult(
+                    f"Error: `{operation}` needs a branch `name`.", success=False
+                )
+            if operation == "checkout":
+                result = await git.checkout(session_id, name)
+                body = f"Now on branch `{result['branch']}`."
+            else:
+                result = await git.merge(session_id, name)
+                if result["conflicted"]:
+                    # Reported as a successful call with a problem in it, not
+                    # as a failure: the merge happened, and the model needs to
+                    # know it is now looking at a tree with markers in it.
+                    body = (
+                        f"Merged `{name}` into `{result['branch']}` with "
+                        f"{len(result['conflicted'])} conflict(s):\n"
+                        + "\n".join(f"  {p}" for p in result["conflicted"])
+                        + "\n\nResolve them, then commit."
+                    )
+                else:
+                    body = f"Merged `{name}` into `{result['branch']}` cleanly."
+
+        elif operation == "new_branch":
+            name = (args.get("name") or "").strip()
+            if not name:
+                return ToolResult(
+                    "Error: `new_branch` needs a branch `name`.", success=False
+                )
+            await git.create_branch(session_id, name)
+            body = f"Created and switched to `{name}`."
+
         else:
             return ToolResult(
-                f"Error: unknown git operation `{operation}`. "
-                "Use one of: init, status, diff, commit, log.",
+                f"Error: unknown git operation `{operation}`. Use one of: "
+                "init, status, diff, commit, log, branch, new_branch, "
+                "checkout, merge.",
                 success=False,
             )
     except git.GitError as exc:
@@ -532,9 +578,73 @@ async def git_tool(
     return ToolResult(output=body, meta={"operation": operation})
 
 
+
+
+async def analyze_project(
+    session_id: str, args: dict, call_id: str, emitter: Emitter | None
+) -> ToolResult:
+    """Measure the sandbox and report it as text the model can reason over.
+
+    Only the *scan* half of `app.analysis` is exposed here. The narrative half
+    is a second model call, and a tool that quietly spends one inside the turn
+    that called it would be charging the user twice for one question — the
+    model reading these numbers can write that paragraph itself, which is the
+    whole point of handing it the numbers.
+    """
+    from app import analysis
+
+    scanned = await analysis.scan(session_id)
+    if not scanned.get("ok"):
+        return ToolResult(
+            f"Could not analyse the project: {scanned.get('reason') or 'unknown reason'}",
+            success=False,
+        )
+    if not scanned["file_count"]:
+        return ToolResult("The sandbox is empty — there is nothing to analyse yet.")
+
+    lines: list[str] = [
+        f"{scanned['file_count']} files, {scanned['total_lines']} lines of code.",
+    ]
+    if scanned["languages"]:
+        lines.append("")
+        lines.append("Languages by lines:")
+        for lang in scanned["languages"][:12]:
+            lines.append(
+                f"  {lang['name']:<12} {lang['lines']:>7} lines  "
+                f"({lang['files']} files)"
+            )
+    if scanned["manifests"]:
+        lines.append("")
+        lines.append("Manifests:")
+        for m in scanned["manifests"][:15]:
+            lines.append(f"  {m['file']}  ({m['ecosystem']})")
+    lines.append("")
+    lines.append(f"Test files: {scanned['tests']['files']}")
+    if scanned["tests"]["sample"]:
+        lines.append("  e.g. " + ", ".join(scanned["tests"]["sample"][:5]))
+    lines.append(
+        "Lint/type config: "
+        + (", ".join(scanned["lint_configs"]) or "none found")
+    )
+    lines.append(f"TODO/FIXME markers: {scanned['todos']['count']}")
+    if scanned["top_level"]:
+        lines.append("")
+        lines.append("Top level: " + ", ".join(scanned["top_level"][:40]))
+
+    return ToolResult(
+        output="\n".join(lines),
+        meta={
+            "file_count": scanned["file_count"],
+            "total_lines": scanned["total_lines"],
+            "languages": scanned["languages"][:8],
+        },
+    )
+
+
 HANDLERS = {
     "bash_execute": bash_execute,
     "git": git_tool,
+    "analyze_project": analyze_project,
     "read_file": read_file,
     "write_file": write_file,
     "edit_file": edit_file,

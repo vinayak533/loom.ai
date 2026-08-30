@@ -320,6 +320,7 @@ async def commit(
     message: str,
     repo: str | None = None,
     paths: list[str] | None = None,
+    use_index: bool = False,
 ) -> dict:
     """Stage and commit. Returns the new commit, or explains why there is none.
 
@@ -335,19 +336,31 @@ async def commit(
     if not await is_repo(session_id, cwd):
         await init(session_id, cwd)
 
-    if paths:
+    # `use_index` commits exactly what is already staged, adding nothing. It is
+    # what the panel sends once its checkboxes have staged a selection —
+    # without it the `git add -A` below would sweep the unticked files straight
+    # back in and the checkboxes would be decorative.
+    if use_index:
+        pass
+    elif paths:
         spec = " ".join(shlex.quote(p) for p in paths)
         staged = await _run(session_id, f"git add -- {spec}", cwd=cwd)
+        if not staged.ok:
+            raise GitError(f"`git add` failed: {staged.text}")
     else:
         staged = await _run(session_id, "git add -A", cwd=cwd)
-    if not staged.ok:
-        raise GitError(f"`git add` failed: {staged.text}")
+        if not staged.ok:
+            raise GitError(f"`git add` failed: {staged.text}")
 
     pending = await _run(session_id, "git diff --cached --quiet", cwd=cwd)
     if pending.ok:  # exit 0 from --quiet means no staged changes
         return {
             "committed": False,
-            "reason": "Nothing to commit — the working tree is clean.",
+            "reason": (
+                "Nothing staged to commit."
+                if use_index
+                else "Nothing to commit — the working tree is clean."
+            ),
             "branch": await branch(session_id, cwd),
         }
 
@@ -385,3 +398,214 @@ async def snapshot(
         "status": await status(session_id, cwd),
         "log": await log(session_id, cwd, limit),
     }
+
+
+# ---------------------------------------------------------------------------
+# staging
+# ---------------------------------------------------------------------------
+#
+# The index is a real thing here, not a formality. `commit(paths=...)` already
+# stages-and-commits in one step and remains the right call for the agent, but
+# a panel with checkboxes needs the two halves separable: a user ticks three
+# files, looks at what they ticked, and *then* commits. Between those moments
+# the selection has to live somewhere, and git already has the place for it.
+
+
+async def stage(
+    session_id: str, paths: list[str], repo: str | None = None
+) -> dict:
+    """`git add` the given paths. Returns the refreshed status."""
+    cwd = _repo_path(repo)
+    if not paths:
+        raise GitError("Nothing to stage.")
+    spec = " ".join(shlex.quote(p) for p in paths)
+    run = await _run(session_id, f"git add -- {spec}", cwd=cwd)
+    if not run.ok:
+        raise GitError(f"`git add` failed: {run.text}")
+    return {"staged": paths, "status": await status(session_id, cwd)}
+
+
+async def unstage(
+    session_id: str, paths: list[str], repo: str | None = None
+) -> dict:
+    """Take the given paths back out of the index, leaving the file untouched.
+
+    `git reset -- <paths>` rather than `git restore --staged`: the latter is
+    newer than the git in some sandbox images, and this has to work on
+    whichever one the template happens to ship. Both leave the working tree
+    alone, which is the property that matters.
+    """
+    cwd = _repo_path(repo)
+    if not paths:
+        raise GitError("Nothing to unstage.")
+    spec = " ".join(shlex.quote(p) for p in paths)
+    run = await _run(session_id, f"git reset -q -- {spec}", cwd=cwd)
+    # A repository with no commits yet has no HEAD to reset against, and git
+    # says so rather than doing nothing. `rm --cached` is the equivalent there.
+    if not run.ok:
+        run = await _run(session_id, f"git rm -q --cached -- {spec}", cwd=cwd)
+    if not run.ok:
+        raise GitError(f"`git reset` failed: {run.text}")
+    return {"unstaged": paths, "status": await status(session_id, cwd)}
+
+
+async def discard(
+    session_id: str, paths: list[str], repo: str | None = None
+) -> dict:
+    """Throw away uncommitted changes to the given paths.
+
+    The one genuinely destructive operation in this module, and the only one
+    whose result cannot be recovered from inside git — an untracked file that
+    is deleted here was never in the object store to begin with. Callers are
+    expected to confirm first; this does not ask.
+    """
+    cwd = _repo_path(repo)
+    if not paths:
+        raise GitError("Nothing to discard.")
+    spec = " ".join(shlex.quote(p) for p in paths)
+    # Tracked files: restore from HEAD. Untracked: remove. Which applies is per
+    # path, so both run and neither failing is fatal on its own.
+    await _run(session_id, f"git checkout -- {spec}", cwd=cwd)
+    await _run(session_id, f"git clean -fdq -- {spec}", cwd=cwd)
+    return {"discarded": paths, "status": await status(session_id, cwd)}
+
+
+# ---------------------------------------------------------------------------
+# branches
+# ---------------------------------------------------------------------------
+
+
+async def branches(session_id: str, repo: str | None = None) -> list[dict]:
+    """Local branches, current one flagged.
+
+    `for-each-ref` rather than `git branch`, for the same reason `log` uses a
+    `--pretty` format: the porcelain output is decorated for humans (a leading
+    `* `, colour when it thinks it has a terminal) and has to be scraped back
+    off. This asks for exactly the fields wanted, separated by a character that
+    cannot occur in a ref name.
+    """
+    cwd = _repo_path(repo)
+    fmt = _FS.join(["%(refname:short)", "%(objectname:short)", "%(contents:subject)"])
+    run = await _run(
+        session_id,
+        f"git for-each-ref --format={shlex.quote(fmt)} refs/heads/",
+        cwd=cwd,
+    )
+    if not run.ok:
+        return []
+    current = await branch(session_id, cwd)
+    out: list[dict] = []
+    for line in run.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(_FS)
+        name = parts[0].strip()
+        if not name:
+            continue
+        out.append(
+            {
+                "name": name,
+                "sha": parts[1].strip() if len(parts) > 1 else "",
+                "subject": parts[2].strip() if len(parts) > 2 else "",
+                "current": name == current,
+            }
+        )
+    return out
+
+
+async def create_branch(
+    session_id: str, name: str, repo: str | None = None
+) -> dict:
+    """Create a branch and switch to it."""
+    cwd = _repo_path(repo)
+    name = (name or "").strip()
+    if not name:
+        raise GitError("A branch needs a name.")
+    run = await _run(session_id, f"git checkout -b {shlex.quote(name)}", cwd=cwd)
+    if not run.ok:
+        raise GitError(f"Could not create `{name}`: {run.text}")
+    return {"branch": name, "created": True}
+
+
+async def checkout(session_id: str, name: str, repo: str | None = None) -> dict:
+    """Switch branches.
+
+    Refuses rather than clobbering when the switch would lose work: git itself
+    declines a checkout that would overwrite local modifications, and that
+    refusal is passed straight through instead of being retried with `-f`.
+    """
+    cwd = _repo_path(repo)
+    name = (name or "").strip()
+    if not name:
+        raise GitError("A branch needs a name.")
+    run = await _run(session_id, f"git checkout {shlex.quote(name)}", cwd=cwd)
+    if not run.ok:
+        raise GitError(f"Could not switch to `{name}`: {run.text}")
+    return {"branch": await branch(session_id, cwd), "output": run.text}
+
+
+async def merge(session_id: str, name: str, repo: str | None = None) -> dict:
+    """Merge another branch into the current one.
+
+    A conflict is a *result*, not an exception: the merge really did happen,
+    the working tree really does have conflict markers in it, and telling the
+    caller "the command failed" would leave them looking at a repository whose
+    state they have not been told about. `conflicted` says which files.
+    """
+    cwd = _repo_path(repo)
+    name = (name or "").strip()
+    if not name:
+        raise GitError("A branch needs a name.")
+    run = await _run(session_id, f"git merge --no-edit {shlex.quote(name)}", cwd=cwd)
+    entries = await status(session_id, cwd)
+    conflicted = [e["path"] for e in entries if e.get("index") == "conflicted"
+                  or e.get("worktree") == "conflicted"]
+    return {
+        "merged": run.ok and not conflicted,
+        "conflicted": conflicted,
+        "branch": await branch(session_id, cwd),
+        "output": run.text,
+    }
+
+
+async def show(session_id: str, sha: str, repo: str | None = None) -> dict:
+    """One commit: its metadata and its diff."""
+    cwd = _repo_path(repo)
+    sha = (sha or "").strip()
+    # Anchored, and only the characters a git object id can contain. This value
+    # reaches a shell command, and while `shlex.quote` below makes injection
+    # impossible on its own, a rejected id gives a better error than a quoted
+    # one that git then fails to resolve.
+    if not sha or not all(c in "0123456789abcdefABCDEF" for c in sha):
+        raise GitError("That is not a commit id.")
+    meta = await _run(
+        session_id,
+        f"git show -s --format={shlex.quote(_LOG_FORMAT)} {shlex.quote(sha)}",
+        cwd=cwd,
+    )
+    if not meta.ok:
+        raise GitError(f"No such commit `{sha}`.")
+    record = meta.stdout.split(_RS)[0]
+    fields = record.split(_FS)
+    body = await _run(
+        session_id, f"git show --format= --patch {shlex.quote(sha)}", cwd=cwd
+    )
+    return {
+        "sha": fields[0].strip() if fields else sha,
+        "short": fields[1].strip() if len(fields) > 1 else sha[:7],
+        "author": fields[2].strip() if len(fields) > 2 else "",
+        "date": fields[3].strip() if len(fields) > 3 else "",
+        "subject": fields[4].strip() if len(fields) > 4 else "",
+        "diff": body.stdout,
+    }
+
+
+async def staged_diff(session_id: str, repo: str | None = None) -> str:
+    """What is currently staged, for writing a commit message about it."""
+    cwd = _repo_path(repo)
+    run = await _run(session_id, "git diff --cached", cwd=cwd)
+    if run.stdout.strip():
+        return run.stdout
+    # Nothing staged: describe the working tree instead, which is what an
+    # unstaged "commit everything" would be about.
+    return (await _run(session_id, "git diff HEAD", cwd=cwd)).stdout

@@ -36,7 +36,7 @@ from app.llm_router import (
     section_default_model,
     section_default_models,
 )
-from app import memory
+from app import analysis, gitmsg, memory
 from app.learn import ingest
 from app.sources import ingest_youtube, is_youtube_url
 from app.tools import git, workspace
@@ -1201,3 +1201,217 @@ async def clear_memories(user_id: str | None = Depends(bearer_user)):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign in to manage memory.")
     await repository.clear_memories(user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- project analysis ------------------------------------------------------
+#
+# Two endpoints rather than one, because the two halves cost very different
+# things. GET is pure measurement — one shell command, no model, no charge —
+# and is what the health panel polls. POST adds the narrative, which is a model
+# call and is therefore always something the user asked for.
+
+
+@router.get("/sessions/{session_id}/analysis")
+async def project_scan(session_id: str, user_id: str | None = Depends(bearer_user)):
+    """Measure the sandbox: languages, size, manifests, tests, TODOs.
+
+    Deterministic and free. A session with no sandbox yet answers
+    `{"ok": false, "reason": ...}` rather than 404 — "nothing has run here" is
+    a state the panel renders, not an error.
+    """
+    await require_session_write(user_id, session_id)
+    return await analysis.scan(session_id)
+
+
+@router.post("/sessions/{session_id}/analysis")
+async def project_analysis(
+    session_id: str,
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Scan, then write the architecture narrative. Costs one model call.
+
+    `write_file: true` also puts the result in LOOM.md at the sandbox root,
+    which is read back into the system prompt on every later turn of this
+    session — that is what makes an analysis outlive the conversation that
+    asked for it.
+    """
+    await require_session_write(user_id, session_id)
+    scanned = await analysis.scan(session_id)
+    if not scanned.get("ok"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            scanned.get("reason") or "There is nothing to analyse yet.",
+        )
+
+    try:
+        written = await analysis.summarise(session_id, scanned, user_id=user_id)
+    except InsufficientCredits as exc:
+        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
+
+    if not written.get("ok"):
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            written.get("reason") or "The summary could not be written.",
+        )
+
+    saved = None
+    if (payload or {}).get("write_file"):
+        saved = await analysis.write_loom_file(session_id, written["text"])
+
+    return {**written, "scan": scanned, "loom_file": saved}
+
+
+# --- git: staging, branches, history ---------------------------------------
+
+
+@router.post("/sessions/{session_id}/git/stage")
+async def git_stage(
+    session_id: str,
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Stage or unstage paths, or discard their changes entirely.
+
+    One endpoint with a `mode` rather than three, matching the `git` tool's own
+    shape: the three share an argument list and a response, and splitting them
+    would be three routes that differ by one verb.
+
+    `discard` is the only destructive operation in this module and cannot be
+    undone from inside git — an untracked file removed here was never in the
+    object store. The UI confirms; this does not.
+    """
+    await require_session_write(user_id, session_id)
+    body = payload or {}
+    mode = str(body.get("mode") or "stage")
+    paths = [str(p) for p in (body.get("paths") or []) if str(p).strip()]
+    if not paths:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No paths given.")
+    if mode not in ("stage", "unstage", "discard"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "`mode` must be stage, unstage or discard.",
+        )
+
+    op = {"stage": git.stage, "unstage": git.unstage, "discard": git.discard}[mode]
+    try:
+        result = await op(session_id, paths)
+    except git.GitError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except SandboxUnavailable as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    snapshot = await git.snapshot(session_id)
+    _broadcast_git(session_id, snapshot)
+    return {**result, "snapshot": snapshot}
+
+
+@router.get("/sessions/{session_id}/git/branches")
+async def git_branches(session_id: str, user_id: str | None = Depends(bearer_user)):
+    await require_session_write(user_id, session_id)
+    if sandbox_manager.sandbox_id_for(session_id) is None:
+        return {"branches": []}
+    try:
+        return {"branches": await git.branches(session_id)}
+    except SandboxUnavailable:
+        return {"branches": []}
+
+
+@router.post("/sessions/{session_id}/git/branch")
+async def git_branch_op(
+    session_id: str,
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Create, switch to, or merge a branch.
+
+    A merge conflict comes back as a normal 200 with `conflicted` naming the
+    files. It is a *result*, not a failure: the merge really happened and the
+    working tree really does have markers in it, so reporting an error would
+    leave the caller looking at a repository whose state nobody told them
+    about.
+    """
+    await require_session_write(user_id, session_id)
+    body = payload or {}
+    name = str(body.get("name") or "").strip()
+    action = str(body.get("action") or "checkout")
+    if not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A branch needs a name.")
+    if action not in ("create", "checkout", "merge"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "`action` must be create, checkout or merge."
+        )
+
+    op = {
+        "create": git.create_branch,
+        "checkout": git.checkout,
+        "merge": git.merge,
+    }[action]
+    try:
+        result = await op(session_id, name)
+    except git.GitError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except SandboxUnavailable as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    snapshot = await git.snapshot(session_id)
+    _broadcast_git(session_id, snapshot)
+    # A checkout rewrites the working tree, so the file sidebar is stale the
+    # moment it succeeds. Nothing else would tell the client that.
+    try:
+        tree = await workspace.list_tree(session_id)
+        emitter = emitter_registry.get(session_id)
+        if emitter:
+            emitter.emit(ev.file_tree(tree["path"], tree["nodes"]))
+    except Exception:  # noqa: BLE001 - the panel still updated; this is extra
+        log.debug("Could not refresh tree after %s", action, exc_info=True)
+
+    return {**result, "snapshot": snapshot}
+
+
+@router.get("/sessions/{session_id}/git/show/{sha}")
+async def git_show(
+    session_id: str, sha: str, user_id: str | None = Depends(bearer_user)
+):
+    """One commit's metadata and diff."""
+    await require_session_write(user_id, session_id)
+    try:
+        return await git.show(session_id, sha)
+    except git.GitError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except SandboxUnavailable as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+@router.post("/sessions/{session_id}/git/message")
+async def git_commit_message(
+    session_id: str, user_id: str | None = Depends(bearer_user)
+):
+    """Suggest a commit message for what is staged. Costs one model call.
+
+    Suggested, never applied: the response is text for the commit box, and the
+    user still presses commit. An agent that writes the message *and* commits
+    it has removed the one step where a person reads what is about to be
+    recorded.
+    """
+    await require_session_write(user_id, session_id)
+    try:
+        diff = await git.staged_diff(session_id)
+    except SandboxUnavailable as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    if not diff.strip():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "There are no changes to describe."
+        )
+
+    try:
+        message = await gitmsg.suggest(session_id, diff, user_id=user_id)
+    except InsufficientCredits as exc:
+        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
+    if not message:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "No model was available to write a message.",
+        )
+    return {"message": message}

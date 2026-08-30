@@ -293,6 +293,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
         SYSTEM_PROMPT,
         user_id=state.get("user_id") or None,
         project_id=state.get("project_id") or None,
+        session_id=state.get("session_id") or None,
     )
 
     try:

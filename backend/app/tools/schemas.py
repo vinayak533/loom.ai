@@ -17,6 +17,7 @@ LIST_FILES = "list_files"
 START_DEV_SERVER = "start_dev_server"
 STOP_DEV_SERVER = "stop_dev_server"
 GIT = "git"
+ANALYZE_PROJECT = "analyze_project"
 
 # Maps a tool name to the LangGraph node that executes it.
 #
@@ -36,6 +37,9 @@ TOOL_NODE = {
     # Git is shell work like the rest, so it routes to the same node and
     # inherits its batching and ordering rules unchanged.
     GIT: "bash_tool",
+    # So is the scan: it is one `find` pipeline in the sandbox, and the
+    # narrative half is not exposed to the model at all.
+    ANALYZE_PROJECT: "bash_tool",
 }
 
 TOOLS: list[dict] = [
@@ -202,7 +206,11 @@ TOOLS: list[dict] = [
             "imperative mood, no 'Updated files'.\n"
             "- `status` to see what is uncommitted before deciding to commit.\n"
             "- `diff` to review your own changes before committing them.\n"
-            "- `log` to see what has already been committed this session.\n\n"
+            "- `log` to see what has already been committed this session.\n"
+            "- `branch` lists branches; `new_branch` creates and switches to "
+            "one; `checkout` switches; `merge` merges another branch into the "
+            "current one. Use a branch when the user asks to try something "
+            "without disturbing what already works.\n\n"
             "There is no remote and nothing is ever pushed. Do not attempt to "
             f"push, add a remote, or authenticate — use {BASH_EXECUTE} only if "
             "the user explicitly asks for a git operation not listed here."
@@ -212,7 +220,17 @@ TOOLS: list[dict] = [
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["init", "status", "diff", "commit", "log"],
+                    "enum": [
+                        "init",
+                        "status",
+                        "diff",
+                        "commit",
+                        "log",
+                        "branch",
+                        "new_branch",
+                        "checkout",
+                        "merge",
+                    ],
                     "description": "Which git operation to run.",
                 },
                 "message": {
@@ -247,9 +265,34 @@ TOOLS: list[dict] = [
                     "type": "integer",
                     "description": "For `log`: how many commits. Defaults to 30.",
                 },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Branch name. Required for `new_branch`, `checkout` "
+                        "and `merge`; ignored otherwise."
+                    ),
+                },
             },
             "required": ["operation"],
         },
+    },
+    {
+        "name": ANALYZE_PROJECT,
+        "description": (
+            "Measure the code in the sandbox: how many files and lines, which "
+            "languages, which manifests and entry points, whether there are "
+            "tests and linting, and how many TODO markers there are."
+            + "\n\n" +
+            "Call it once when you arrive in a codebase you did not write — "
+            "after the user imports a folder, or when they ask what a project "
+            "is or how it is laid out. It reads the whole tree in one pass, "
+            "which is far cheaper and far more complete than listing "
+            "directories one at a time."
+            + "\n\n" +
+            "It measures; it does not read source. Follow it with `read_file` "
+            "on whatever it turns up that matters."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": WEB_SEARCH,
