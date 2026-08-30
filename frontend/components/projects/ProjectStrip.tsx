@@ -18,9 +18,12 @@ import type { ProjectsState } from "@/lib/useProjects";
  * on the selected chip is what opens the project itself, which is the only
  * screen where instructions and knowledge files can be edited.
  *
- * Hidden entirely when signed out. Projects are account-scoped rows, and an
- * anonymous visitor offered a "New project" button that silently makes
- * something only this browser can ever see is worse than not offering it.
+ * Shown signed out as well as in. Projects follow exactly the rule sessions
+ * already follow — an anonymous caller gets the anonymous shelf, a real set of
+ * rows rather than an empty one — so hiding this when signed out would make
+ * the feature invisible in the default `REQUIRE_AUTH=0` configuration while
+ * the API behind it worked fine. Memory is the opposite case and *is* gated,
+ * because the server genuinely refuses to store it without an account.
  */
 export function ProjectStrip({
   projects,
@@ -33,8 +36,6 @@ export function ProjectStrip({
 }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
-
-  if (!signedIn) return null;
 
   const submit = async () => {
     const trimmed = name.trim();
@@ -87,6 +88,7 @@ export function ProjectStrip({
       {projects.projects.length === 0 && !creating && (
         <p className="text-2xs leading-relaxed text-ink-faint">
           Group conversations and give them shared instructions and files.
+          {!signedIn && " Sign in to keep them across devices."}
         </p>
       )}
 

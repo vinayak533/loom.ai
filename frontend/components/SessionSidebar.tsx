@@ -46,6 +46,7 @@ export const SessionSidebar = memo(function SessionSidebar({
   projects,
   signedIn = false,
   onOpenProject,
+  onMoveToProject,
 }: {
   sessions: SessionRow[];
   activeId: string | null;
@@ -67,6 +68,7 @@ export const SessionSidebar = memo(function SessionSidebar({
   projects?: ProjectsState;
   signedIn?: boolean;
   onOpenProject?: (id: string) => void;
+  onMoveToProject?: (sessionId: string, projectId: string | null) => void;
 }) {
   const motionOK = useMotionOK();
   const touch = useMediaQuery(TOUCH_QUERY);
@@ -158,9 +160,15 @@ export const SessionSidebar = memo(function SessionSidebar({
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-1.5 pb-3">
         {sessions.length === 0 ? (
           <p className="px-3 py-2 text-xs leading-relaxed text-ink-faint">
-            {view === "archived"
-              ? "Nothing archived. Archiving a session takes it out of this list without deleting it."
-              : "Sessions are listed here once Supabase is connected. Until then the current session lives in memory."}
+            {/* A project filter has its own empty state. Falling through to
+                the Supabase notice below tells the user their database is
+                unconfigured when in fact it answered fine and the filter
+                simply matched nothing — a wrong diagnosis is worse than none. */}
+            {projects?.filter
+              ? `Nothing filed in ${projects.byId(projects.filter)?.name ?? "this project"} yet. Starting a session while it is selected files it here.`
+              : view === "archived"
+                ? "Nothing archived. Archiving a session takes it out of this list without deleting it."
+                : "Sessions are listed here once Supabase is connected. Until then the current session lives in memory."}
           </p>
         ) : (
           <>
@@ -177,6 +185,8 @@ export const SessionSidebar = memo(function SessionSidebar({
                         touch={touch}
                         onSelect={onSelectSession}
                         onAction={onSessionAction}
+                        projectOptions={projects?.projects}
+                        onMoveToProject={onMoveToProject}
                       />
                     ))}
                   </AnimatePresence>
@@ -197,6 +207,8 @@ export const SessionSidebar = memo(function SessionSidebar({
                         touch={touch}
                         onSelect={onSelectSession}
                         onAction={onSessionAction}
+                        projectOptions={projects?.projects}
+                        onMoveToProject={onMoveToProject}
                       />
                     ))}
                   </AnimatePresence>

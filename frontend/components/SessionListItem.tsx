@@ -22,6 +22,8 @@ export const SessionListItem = memo(function SessionListItem({
   touch,
   onSelect,
   onAction,
+  projectOptions,
+  onMoveToProject,
 }: {
   session: SessionRow;
   active: boolean;
@@ -29,6 +31,9 @@ export const SessionListItem = memo(function SessionListItem({
   touch?: boolean;
   onSelect: (id: string) => void;
   onAction: (id: string, action: HistoryAction) => void;
+  /** Passed straight through to the menu. Absent where there are no projects. */
+  projectOptions?: { id: string; name: string }[];
+  onMoveToProject?: (sessionId: string, projectId: string | null) => void;
 }) {
   const motionOK = useMotionOK();
 
@@ -94,6 +99,13 @@ export const SessionListItem = memo(function SessionListItem({
           archived={Boolean(session.is_archived)}
           alwaysVisible={touch}
           onAction={(action) => onAction(session.id, action)}
+          projectOptions={projectOptions}
+          currentProjectId={session.project_id ?? null}
+          onMoveToProject={
+            onMoveToProject
+              ? (projectId) => onMoveToProject(session.id, projectId)
+              : undefined
+          }
         />
       </div>
     </motion.li>

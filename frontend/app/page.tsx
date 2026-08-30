@@ -594,6 +594,25 @@ export default function Page() {
     setTimeout(refreshSessions, 400);
   }, [token, selection, convSection, setSessionId, refreshSessions, projects]);
 
+  /**
+   * File a conversation into a project, or out of one.
+   *
+   * The local row is updated first so the filtered list reacts on the click
+   * rather than a round trip later — with a filter active, moving a session
+   * *out* has to make it leave the list immediately or the action looks like
+   * it did nothing.
+   */
+  const moveSessionToProject = useCallback(
+    async (id: string, projectId: string | null) => {
+      setSessions((current) =>
+        current.map((s) => (s.id === id ? { ...s, project_id: projectId } : s)),
+      );
+      await projects.assign(id, projectId);
+      setTimeout(refreshSessions, 300);
+    },
+    [projects, refreshSessions],
+  );
+
   const removeSession = useCallback(
     async (id: string) => {
       await apiDeleteSession(id, token).catch(() => undefined);
@@ -1457,6 +1476,7 @@ export default function Page() {
               projects={projects}
               signedIn={auth.signedIn}
               onOpenProject={setProjectPanel}
+              onMoveToProject={moveSessionToProject}
             />
           </motion.aside>
         )}

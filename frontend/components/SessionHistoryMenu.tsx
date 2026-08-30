@@ -29,6 +29,9 @@ export function SessionHistoryMenu({
   align = "right",
   alwaysVisible = false,
   actions = ["rename", "pin", "archive", "delete"],
+  projectOptions,
+  currentProjectId = null,
+  onMoveToProject,
 }: {
   pinned: boolean;
   archived: boolean;
@@ -45,9 +48,23 @@ export function SessionHistoryMenu({
    * offering one fewer.
    */
   actions?: HistoryAction[];
+  /**
+   * Projects this session can be filed into. Optional: the notebook library
+   * mounts this same menu and has no project concept, and an entry that
+   * cannot be honoured is worse than one fewer.
+   */
+  projectOptions?: { id: string; name: string }[];
+  currentProjectId?: string | null;
+  onMoveToProject?: (projectId: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  /**
+   * The project picker replaces the menu body in place, the same way the
+   * delete confirm does. A flyout submenu inside a 172px panel that already
+   * lives in a scrolling container is a clipping problem with extra steps.
+   */
+  const [picking, setPicking] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const motionOK = useMotionOK();
 
@@ -72,9 +89,13 @@ export function SessionHistoryMenu({
     };
   }, [open]);
 
-  // A menu that reopens still holding a primed delete is a trap.
+  // A menu that reopens still holding a primed delete — or still in the
+  // project picker — is a trap.
   useEffect(() => {
-    if (!open) setConfirming(false);
+    if (!open) {
+      setConfirming(false);
+      setPicking(false);
+    }
   }, [open]);
 
   const run = (action: HistoryAction) => {
@@ -137,6 +158,33 @@ export function SessionHistoryMenu({
               align === "right" ? "right-0" : "left-0",
             )}
           >
+            {picking ? (
+              <div className="max-h-56 overflow-y-auto">
+                <p className="px-2 pb-1 pt-1 text-2xs text-ink-faint">Move to</p>
+                <MenuItem
+                  onClick={() => {
+                    setOpen(false);
+                    onMoveToProject?.(null);
+                  }}
+                  icon={<span className="w-[15px]" />}
+                  label="No project"
+                  muted={currentProjectId === null}
+                />
+                {(projectOptions ?? []).map((p) => (
+                  <MenuItem
+                    key={p.id}
+                    onClick={() => {
+                      setOpen(false);
+                      onMoveToProject?.(p.id);
+                    }}
+                    icon={<span className="w-[15px]" />}
+                    label={p.name}
+                    muted={currentProjectId === p.id}
+                  />
+                ))}
+              </div>
+            ) : (
+            <>
             {actions.includes("rename") && (
               <MenuItem
                 onClick={() => run("rename")}
@@ -156,6 +204,14 @@ export function SessionHistoryMenu({
                 onClick={() => run("archive")}
                 icon={<ArchiveIcon />}
                 label={archived ? "Unarchive" : "Archive"}
+              />
+            )}
+
+            {onMoveToProject && projectOptions && (
+              <MenuItem
+                onClick={() => setPicking(true)}
+                icon={<FolderIcon />}
+                label="Move to project"
               />
             )}
 
@@ -197,6 +253,8 @@ export function SessionHistoryMenu({
                 danger
               />
             )}
+            </>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -209,11 +267,18 @@ function MenuItem({
   label,
   onClick,
   danger,
+  muted,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
   danger?: boolean;
+  /**
+   * This entry is where the session already is. Still clickable — re-choosing
+   * it is a harmless no-op, and disabling it would remove the one row that
+   * answers "which project is this in?" from the keyboard order.
+   */
+  muted?: boolean;
 }) {
   return (
     <button
@@ -229,10 +294,27 @@ function MenuItem({
         danger
           ? "text-ink-muted hover:bg-del/12 hover:text-del"
           : "text-ink-muted hover:bg-raised hover:text-ink",
+        muted && "text-ink",
       )}
     >
       <span className="shrink-0 opacity-80">{icon}</span>
-      {label}
+      <span className="min-w-0 truncate">{label}</span>
+      {muted && (
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="ml-auto shrink-0 text-accent"
+          aria-hidden
+        >
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      )}
     </button>
   );
 }
@@ -252,6 +334,24 @@ export function PinIcon({ filled }: { filled?: boolean }) {
     >
       <path d="M9 3h6l-.7 5.2 3 3.1V14H6.7v-2.7l3-3.1L9 3Z" />
       <path d="M12 14v7" fill="none" />
+    </svg>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 7a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.7.9l.8 1.2H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
     </svg>
   );
 }
