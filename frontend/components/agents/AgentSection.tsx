@@ -345,6 +345,7 @@ export function AgentSection({
         sessions={shelf}
         activeId={sessionId}
         open={shelfOpen}
+        token={token}
         onToggle={() => setShelfOpen((o) => !o)}
         onSelect={(id) => {
           setSessions((s) => ({ ...s, [agent.id]: id }));

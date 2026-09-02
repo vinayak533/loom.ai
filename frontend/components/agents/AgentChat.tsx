@@ -9,6 +9,7 @@ import type { BranchGroup } from "@/lib/events";
 import { formatCredits } from "@/lib/agents";
 import type { AgentState, ChatItem } from "@/lib/useAgentSocket";
 import { cn } from "@/lib/cn";
+import { useFeedback } from "@/lib/useFeedback";
 import { SPRING, SPRING_SNAP, useMotionOK } from "../Anim";
 import { Markdown } from "../Markdown";
 import { ModelSelector } from "../ModelSelector";
@@ -17,6 +18,7 @@ import { ToolCallCard } from "../ToolCallCard";
 import { TraceRow, TraceTail } from "../TraceSpine";
 import {
   AssistantActions,
+  FeedbackButtons,
   MessageEditor,
   UserActions,
 } from "../MessageActions";
@@ -210,6 +212,35 @@ export function AgentChat({
     }
     return null;
   }, [visible]);
+
+  const { ratings, rate } = useFeedback(sessionId, token);
+
+  /**
+   * Which assistant reply each row is, counting assistant rows from zero — a
+   * second ordinal alongside `turnIndexOf` and deliberately not shared with
+   * it, exactly as in `ChatPanel`. Here the two diverge more often than they
+   * do in Chat, because an agent turn nearly always spends tool calls and
+   * approval cards between the question and the answer.
+   */
+  const assistantIndexOf = useMemo(() => {
+    const map = new Map<string, number>();
+    let n = 0;
+    for (const item of visible) {
+      if (item.kind === "assistant") map.set(item.id, n++);
+    }
+    return map;
+  }, [visible]);
+
+  const onRate = useCallback(
+    (assistantIndex: number, rating: "up" | "down" | null) =>
+      rate(assistantIndex, rating, {
+        modelId: state.modelId,
+        // The section these sessions were created under, so a verdict here is
+        // separable from one left in Chat or Code when the table is read.
+        section: "agents",
+      }),
+    [rate, state.modelId],
+  );
 
   const startEdit = useCallback((turnIndex: number) => setEditingTurn(turnIndex), []);
   const cancelEdit = useCallback(() => setEditingTurn(null), []);
@@ -423,6 +454,13 @@ export function AgentChat({
                 turnIndexOf.get(item.id) === editingTurn
               }
               isLastAssistant={item.id === lastAssistantId}
+              assistantIndex={assistantIndexOf.get(item.id)}
+              rating={
+                assistantIndexOf.has(item.id)
+                  ? ratings[assistantIndexOf.get(item.id)!] ?? null
+                  : null
+              }
+              onRate={onRate}
               onStartEdit={startEdit}
               onCancelEdit={cancelEdit}
               onSubmitEdit={submitEdit}
@@ -645,6 +683,9 @@ function Row({
   branch,
   editing,
   isLastAssistant,
+  assistantIndex,
+  rating,
+  onRate,
   onStartEdit,
   onCancelEdit,
   onSubmitEdit,
@@ -664,6 +705,9 @@ function Row({
   branch?: BranchGroup;
   editing: boolean;
   isLastAssistant: boolean;
+  assistantIndex?: number;
+  rating: "up" | "down" | null;
+  onRate: (assistantIndex: number, rating: "up" | "down" | null) => void;
   onStartEdit: (turnIndex: number) => void;
   onCancelEdit: () => void;
   onSubmitEdit: (turnIndex: number, text: string) => void;
@@ -732,6 +776,14 @@ function Row({
                 canRegenerate={isLastAssistant}
                 busy={busy}
                 onRegenerate={onRegenerate}
+                extra={
+                  assistantIndex === undefined ? null : (
+                    <FeedbackButtons
+                      rating={rating}
+                      onRate={(next) => onRate(assistantIndex, next)}
+                    />
+                  )
+                }
               />
             )}
           </div>

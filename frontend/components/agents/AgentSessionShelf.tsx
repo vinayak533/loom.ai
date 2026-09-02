@@ -7,6 +7,7 @@ import type { AgentSummary } from "@/lib/agents";
 import { cn } from "@/lib/cn";
 import { SPRING_SNAP, useMotionOK } from "../Anim";
 import type { HistoryAction } from "../SessionHistoryMenu";
+import { SearchBox, SearchResults, useSessionSearch } from "../SessionSearch";
 import { SessionListItem } from "../SessionListItem";
 import { AgentIcon } from "./AgentIcon";
 
@@ -20,13 +21,16 @@ import { AgentIcon } from "./AgentIcon";
  * The rows are the shared `SessionListItem`, which brings the shared
  * `SessionHistoryMenu` with it. That was the explicit requirement, and it is
  * also the reason pin, archive and delete behave identically here and in Chat:
- * there is one implementation of each.
+ * there is one implementation of each. Search arrives the same way, from
+ * `SessionSearch` — scoped to this agent's id rather than to a section, which
+ * is the one thing about it that differs from Chat's.
  */
 export function AgentSessionShelf({
   agent,
   sessions,
   activeId,
   open,
+  token,
   onToggle,
   onSelect,
   onNew,
@@ -36,12 +40,14 @@ export function AgentSessionShelf({
   sessions: SessionRow[];
   activeId: string | null;
   open: boolean;
+  token?: string | null;
   onToggle: () => void;
   onSelect: (id: string) => void;
   onNew: () => void;
   onAction: (id: string, action: HistoryAction) => void;
 }) {
   const motionOK = useMotionOK();
+  const search = useSessionSearch(token, { agentId: agent.id });
 
   const { pinned, rest } = useMemo(
     () => ({
@@ -123,6 +129,28 @@ export function AgentSessionShelf({
               </button>
             </div>
 
+            <div className="px-2.5 pb-2">
+              <SearchBox
+                value={search.query}
+                onChange={search.setQuery}
+                busy={search.busy}
+                placeholder={`Search ${agent.name} history…`}
+              />
+            </div>
+
+            {search.active ? (
+              <SearchResults
+                hits={search.hits}
+                busy={search.busy}
+                query={search.query}
+                error={search.error}
+                activeId={activeId}
+                onSelect={(id) => {
+                  search.clear();
+                  onSelect(id);
+                }}
+              />
+            ) : (
             <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-3">
               {sessions.length === 0 && (
                 <p className="px-2 py-6 text-center font-sans text-2xs leading-relaxed text-ink-faint">
@@ -170,6 +198,7 @@ export function AgentSessionShelf({
                 </>
               )}
             </div>
+            )}
           </motion.aside>
         )}
       </AnimatePresence>
