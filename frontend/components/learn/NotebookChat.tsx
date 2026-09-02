@@ -30,6 +30,15 @@ const STARTERS = [
  * retrieval and a single answer, and the interesting metadata is *which
  * passages it used*, so the citation strip is the thing that gets the room the
  * trace spine gets over there.
+ *
+ * Which is also the answer to why the message actions Chat, Code and Agents
+ * share are absent here, rather than an oversight to be tidied up later. Each
+ * of them assumes a thread you can rewind: edit re-runs the conversation from
+ * a point, regenerate discards everything after a reply, the branch switcher
+ * keeps the version you replaced. A notebook question forks nothing and leaves
+ * nothing behind it to discard — and this chat is not persisted at all, so a
+ * verdict recorded against turn three would be a verdict against something
+ * that stops existing when the panel closes.
  */
 export function NotebookChat({
   turns,

@@ -277,6 +277,16 @@ earlier one is the same operation as editing the message above it without
 changing the text, and offering it separately would be a second door onto one
 room — with the added cost of silently discarding everything after it.
 
+**Learn's notebook Q&A has none of these, on purpose.** Every control in that
+table assumes a thread you can rewind: edit re-runs the conversation from a
+point, regenerate discards what came after, branching keeps the version you
+replaced. A notebook question is a single retrieval against a fixed set of
+sources and a single answer — there is no checkpoint to fork and nothing after
+a reply to discard, and the answer's interesting metadata is which passages it
+used, which is why that panel spends its room on a citation strip instead. The
+notebook chat is not even persisted (the notes panel is where a notebook keeps
+things on purpose), so there would be nothing for a verdict to hang on either.
+
 ---
 
 ### Conversation branching
@@ -374,7 +384,13 @@ waits on a generative call is both slower and worse than one that does not.
 The input debounces at 200ms and aborts every superseded request, so results
 for "auth" cannot land after results for "authentication" and overwrite them.
 
-Chat and Code search separately, matching their separate history lists.
+Chat, Code and Agents each search their own history. The first two scope by
+section; an agent scopes by its own id, because a conversation belongs to the
+specialist it was started with. Same box, same debounce, same endpoint —
+`components/SessionSearch.tsx`, used from both the flyout and the agent shelf,
+because two copies of an abort-and-debounce dance is two places to get
+out-of-order responses wrong.
+
 Cross-section search is not implemented.
 
 ---
@@ -434,14 +450,28 @@ is a raster — which is what a scanned document is. A chip reading
 `report.pdf · PDF` tells you what you already knew when you picked the file;
 the first page tells you whether it is the *right* report.
 
-`lib/thumbnail.ts` does this without `pdfjs-dist`, and is explicit about the
-trade: that library renders any PDF perfectly and costs ~350 KB plus a worker,
-which is a real price for a 30-pixel square. Instead it scans for a
-`/DCTDecode` stream and hands the embedded JPEG to the browser's own decoder. A
-vector-only PDF — a LaTeX paper, a clean export — has no raster to find, so it
-returns null and the chip keeps its type icon. The feature degrades to exactly
-what was there before rather than to something broken. Everything runs locally
-on the chosen file, before any upload.
+`lib/thumbnail.ts` tries the cheap way first: it scans for a `/DCTDecode`
+stream and hands the embedded JPEG to the browser's own decoder — no library,
+no worker, a few hundred bytes of code, and it covers every scanned document.
+A vector-only PDF (a LaTeX paper, a clean export) has no raster to find, and
+that is what `pdfjs-dist` is for. It renders any PDF correctly and costs ~350 KB
+plus a worker, which is why it is reached for *second* and behind a dynamic
+`import()`: it is fetched the first time somebody attaches a PDF the byte scan
+could not draw, and never by anyone who does not. The initial bundle does not
+move.
+
+Two details that are not obvious from the outside. The worker is copied into
+`public/` at `predev`/`prebuild` rather than referenced through
+`new URL(..., import.meta.url)` — the documented form, which Next hands to SWC,
+which then parses an already-bundled worker as source and fails on its
+`export`. And `render` is called with `intent: "print"`, which has nothing to do
+with printing: it is the one option that stops pdf.js scheduling its work with
+`requestAnimationFrame`, which browsers do not fire in a hidden tab. Without
+it, attaching a PDF and switching away leaves the thumbnail unresolved and the
+worker alive until you come back.
+
+A PDF that is neither — corrupt, encrypted, an empty page — still falls back to
+the type icon. Everything runs locally on the chosen file, before any upload.
 
 ---
 
@@ -1292,12 +1322,16 @@ frontend/
   only on the final frame, which a stopped stream never receives, so the charge
   is derived from the characters actually streamed at four per token. The
   alternative is billing nothing for output that was really produced.
-* **PDF thumbnails need an embedded raster.** A vector-only PDF falls back to
-  the type icon — see **Attachment previews** for why that is the trade rather
-  than the bug.
-* **History search is per section and literal.** Chat and Code search
-  separately, matching their separate history lists; there is no cross-section
-  search. Matching is substring, not fuzzy and not semantic.
+* **A PDF thumbnail costs a 350 KB download the first time.** Only for a
+  vector PDF, only once per session, and only for someone who attaches one —
+  the byte scan handles scanned documents with no library at all. A PDF that
+  neither path can draw keeps its type icon.
+* **History search is per section and literal.** Chat, Code and Agents each
+  search their own history; there is no cross-section search. Matching is
+  substring, not fuzzy and not semantic.
+* **Learn's notebook Q&A has no message actions.** No copy row, no edit, no
+  branching, no thumbs — see **Message actions** for why those controls do not
+  describe a single grounded retrieval.
 * **Response feedback feeds nothing.** It is captured and stored, and that is
   all it does today.
 * **Project knowledge is injected whole, not retrieved.** Every ready file goes
