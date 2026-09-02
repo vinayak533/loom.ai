@@ -8,6 +8,9 @@ import type { GitState } from "@/lib/useAgentSocket";
 import { cn, shortPath } from "@/lib/cn";
 import { SPRING_SNAP, useMotionOK } from "./Anim";
 
+const NO_CHANGES: GitChange[] = [];
+const NO_COMMITS: GitCommit[] = [];
+
 /**
  * The Code section's version-control face.
  *
@@ -203,8 +206,11 @@ export const GitPanel = memo(function GitPanel({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [branchOpen, setBranchOpen] = useState(false);
 
-  const changes = git?.status ?? [];
-  const commits = git?.log ?? [];
+  // Shared empty arrays rather than fresh literals: `[]` is a new identity
+  // every render, so the memos below that sort and group these re-ran on every
+  // keystroke in the commit box while the panel had no repository attached.
+  const changes = git?.status ?? NO_CHANGES;
+  const commits = git?.log ?? NO_COMMITS;
   const canCommit = changes.length > 0 && message.trim().length > 0 && !busy;
 
   const submit = useCallback(() => {

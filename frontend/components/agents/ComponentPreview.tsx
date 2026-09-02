@@ -137,7 +137,7 @@ export function ComponentPreview({
           </div>
           <p className="mt-2 text-center font-sans text-2xs text-ink-dim">
             Sandboxed render on a white ground, with Tailwind from a CDN. Not
-            the Code section's dev server — enough to see the component, no
+            the Code section’s dev server — enough to see the component, no
             build step behind it.
           </p>
         </div>

@@ -1040,10 +1040,17 @@ export default function Page() {
     setRailOpen(false);
     setFlyoutOpen(false);
   }, []);
-  const selectSession = useCallback((id: string) => {
-    setSessionId(id);
-    setFlyoutOpen(false);
-  }, []);
+  // `setSessionId` is rebuilt whenever the section changes — it writes the id
+  // into that section's slot — so an empty dependency list here pinned this to
+  // the section that was open at mount. Picking a Code session out of the
+  // flyout filed it under Chat and left Code where it was.
+  const selectSession = useCallback(
+    (id: string) => {
+      setSessionId(id);
+      setFlyoutOpen(false);
+    },
+    [setSessionId],
+  );
   // Read through refs so `selectFile` is not rebuilt on every file the agent
   // touches — it is passed to memoized panels, and a new identity per event
   // would re-render the whole context column mid-stream.

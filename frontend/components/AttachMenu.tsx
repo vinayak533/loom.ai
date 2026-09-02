@@ -228,7 +228,11 @@ export const AttachMenu = forwardRef<AttachMenuHandle, {
     }
   };
 
-  useImperativeHandle(ref, () => ({ openFolder: () => void openFolder() }), []);
+  // No dependency list on purpose. `openFolder` is redefined every render and
+  // closes over the current props, so pinning the handle to the first one
+  // would have the parent calling last mount's version of it. Rebuilding the
+  // object each render costs an assignment.
+  useImperativeHandle(ref, () => ({ openFolder: () => void openFolder() }));
 
   const addLooseFiles = (list: FileList | null) => {
     if (!list?.length) return;

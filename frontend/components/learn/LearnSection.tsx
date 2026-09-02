@@ -475,7 +475,7 @@ function NotebookSection({
           {config && !config.persisted && (
             <p className="pointer-events-none absolute inset-x-0 bottom-3 mx-auto w-fit rounded-ctl
                           border border-warn/25 bg-[rgba(240,181,74,0.09)] px-3 py-1.5 text-2xs text-warn">
-              Supabase is not configured — notebooks live in the backend's memory
+              Supabase is not configured — notebooks live in the backend’s memory
               and are lost on restart.
             </p>
           )}
