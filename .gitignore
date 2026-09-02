@@ -48,3 +48,6 @@ frontend/.next-prod/
 # ignore covers this on the machine it was written on; repeating it here is
 # what makes the exclusion survive a clone.
 .claude/settings.local.json
+
+# Staged from node_modules by scripts/copy-pdf-worker.mjs at predev/prebuild.
+frontend/public/pdf.worker.min.mjs
