@@ -9,6 +9,7 @@ naming call routed through the router) — so existing call sites do not change.
 from __future__ import annotations
 
 import logging
+import re
 
 from app.agent.prompts import PROJECT_META_PROMPT, TITLE_PROMPT
 from app.config import get_settings
@@ -32,6 +33,70 @@ log = logging.getLogger(__name__)
 #: output budget thinking before they emit any text, so a 32-token call to one
 #: comes back empty — see the note on ``OpenCodeAdapter``.
 TITLE_MODELS = ("gpt-oss-120b", "llama-4-scout", "nemotron-3")
+
+
+#: The shapes a session title must not have.
+#:
+#: All three are failures of the *same* kind: the naming call answered with
+#: something that is not a name. Only the first was guarded originally, which
+#: is why the shelf still filled with reasoning — a model that thinks out loud
+#: about a 32-token prompt spends the whole budget narrating it, and the
+#: narration was stored verbatim as the session's name.
+#:
+#: Prefix-anchored on purpose. A title is three to six words, so a phrase that
+#: *opens* like an explanation is one; a title that merely contains the word
+#: "user" is not, and matching anywhere would throw away good names.
+#:
+#: Shared with ``scripts.clean_session_debt``, which repairs the rows written
+#: while this was loose. One definition, so the pass that cleans up and the
+#: guard that stops the next one cannot drift apart.
+TITLE_REJECTS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    (
+        "empty-turn placeholder",
+        re.compile(re.escape(EMPTY_TURN_TEXT[:45]), re.I),
+    ),
+    (
+        "narrated prompt",
+        re.compile(
+            r"^\s*("
+            r"the user (wants|is asking|asks|would like|said|has)"
+            r"|we (need|have) to"
+            r"|i (need|should|will|can|must) (to )?(write|produce|create|come up|make|give)"
+            r"|okay[,.!]?\s+(so|the user|let)"
+            r"|let'?s (think|write|see|start)"
+            r"|(first|so)[,.]\s"
+            # Only the preamble form. "Here is upstream data" is somebody's
+            # actual opening message and makes a perfectly good title; "Here
+            # is a title for the session" is the model clearing its throat.
+            r"|here('?s| is) (a|the) (title|name|suggestion)"
+            r"|(title|answer)\s*:"
+            r"|sure[,.!]\s"
+            r")",
+            re.I,
+        ),
+    ),
+    # A heading, a fence or a line break means a document was stored in a
+    # column that holds a phrase.
+    ("markdown document", re.compile(r"^\s*(#{1,6}\s|```)|\n")),
+)
+
+#: Above this, the answer is prose rather than a name. The prompt asks for
+#: three to six words; sixteen is far enough past that to catch narration
+#: which opens in a way the patterns above do not anticipate, without
+#: second-guessing a model that simply wrote a long title.
+TITLE_WORD_CAP = 16
+
+
+def title_rejection(title: str | None) -> str | None:
+    """Why this string is not a session title, or ``None`` if it is one."""
+    if not title or not title.strip():
+        return "empty"
+    for reason, pattern in TITLE_REJECTS:
+        if pattern.search(title):
+            return reason
+    if len(title.split()) > TITLE_WORD_CAP:
+        return "prose, not a name"
+    return None
 
 
 def _title_model() -> str:
@@ -71,20 +136,21 @@ async def generate_title(first_message: str) -> str | None:
 
     title = _text_of(message).strip().strip('"')
 
-    # A turn that produced no text comes back as the router's placeholder
-    # sentence rather than as an empty string — there has to be *something* in
-    # an assistant message or the next request rejects the history. That is
-    # right for the transcript and completely wrong here: it was being stored
-    # verbatim as the session's name, so the shelf filled up with rows called
-    # "(The model ended its turn without producing an answer. This usually
-    # means it spe". No name at all is better; the session keeps its default
-    # and the next turn is free to try again.
+    # Two ways this call answers with something that is not a name, both from
+    # the same cause. A turn that produced no text comes back as the router's
+    # placeholder sentence rather than as an empty string — there has to be
+    # *something* in an assistant message or the next request rejects the
+    # history — and a reasoning model that does emit text spends a 32-token
+    # budget narrating the prompt back ("The user wants a 3-6 word title…").
+    # Both were being stored verbatim as the session's name. No name at all is
+    # better: the session keeps its default and the next turn may try again.
     #
     # Guarded here rather than at the model choice because `TITLE_MODELS`
     # cannot promise it: `complete_with_fallback` may route past all three into
-    # a reasoning model, which is exactly the case that returns nothing from a
-    # 32-token budget.
-    if not title or title.startswith(EMPTY_TURN_TEXT[:40]):
+    # a reasoning model, which is exactly the case that produces both shapes.
+    reason = title_rejection(title)
+    if reason:
+        log.info("Discarding generated title (%s): %r", reason, title[:80])
         return None
     return title[:80] or None
 

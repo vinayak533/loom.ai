@@ -21,6 +21,10 @@ and one is a whole `## Setup` document. A reasoning model answered the naming
 call by thinking out loud, and only the empty-turn sentinel was being guarded
 against. Same symptom, same shelf, so the same pass cleans both.
 
+The guard has since been widened to cover this shape too, and it is now the
+*same* predicate this script uses (`app.agent.llm.title_rejection`), so a row
+this pass would clean is a row the runtime would no longer write.
+
 **3. Leaked provider errors in transcripts.** An OpenRouter 402 used to be
 written into the conversation verbatim — roughly 900 characters of nested JSON
 including an account identifier. `ModelCallError.user_message()` fixed the
@@ -50,32 +54,10 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
+from app.agent.llm import title_rejection  # noqa: E402
 from app.db.supabase_client import enabled, get_client  # noqa: E402
-from app.llm_router import EMPTY_TURN_TEXT  # noqa: E402
 
 UNTITLED = "Untitled session"
-
-#: A title is broken when it matches any of these.
-#:
-#: Matched on a prefix rather than the whole string because the column is
-#: `text` but the values were truncated at 80 characters on the way in, so no
-#: two are identical past that point.
-BROKEN_TITLE_TESTS: list[tuple[str, re.Pattern[str]]] = [
-    (
-        "empty-turn placeholder",
-        re.compile(re.escape(EMPTY_TURN_TEXT[:45]), re.I),
-    ),
-    (
-        "leaked title-prompt reasoning",
-        re.compile(
-            r"^\s*(the user (wants|is asking|asks)|we need to|i (need|should) (to )?(write|produce))",
-            re.I,
-        ),
-    ),
-    # A title is a short phrase. A markdown heading, a fenced block or a line
-    # break means a whole document was stored in the column.
-    ("markdown document", re.compile(r"^\s*(#{1,6}\s|```)|\n")),
-]
 
 #: Raw provider payloads that were being written into transcripts. Deliberately
 #: narrow: this deletes nothing and rewrites message bodies, so a false
@@ -96,12 +78,21 @@ REDACTED = (
 
 
 def why_broken(title: str | None) -> str | None:
+    """Why this stored title is not a name, or ``None`` if it is one.
+
+    Delegates to :func:`app.agent.llm.title_rejection` — the same predicate the
+    runtime now applies before storing a title. The tests used to live here,
+    which is exactly how the two drifted: this script knew about narrated
+    reasoning while the guard still only knew about the empty-turn sentinel, so
+    it kept finding the class of row the guard kept letting through. One
+    definition, one answer, and a cleanup that cannot outpace the fix again.
+
+    A session with no title at all is not broken — that is the default-name
+    case, and renaming it is not this pass's job.
+    """
     if not title:
         return None
-    for reason, pattern in BROKEN_TITLE_TESTS:
-        if pattern.search(title):
-            return reason
-    return None
+    return title_rejection(title)
 
 
 def first_user_text(client, session_id: str) -> str:
