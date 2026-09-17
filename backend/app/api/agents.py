@@ -72,7 +72,6 @@ async def create_agent_session(
     """
     if not registry.is_agent(agent_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown agent `{agent_id}`.")
-    settings = get_settings()
     return await repository.create_session(
         str(uuid.uuid4()),
         user_id,
@@ -137,8 +136,10 @@ async def credit_topup(
     amount = payload.get("amount")
     try:
         amount = float(amount)
-    except (TypeError, ValueError):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "`amount` must be a number.")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "`amount` must be a number."
+        ) from exc
     if amount <= 0 or amount > 1_000_000:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "`amount` must be between 0 and 1,000,000."

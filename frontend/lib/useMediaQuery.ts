@@ -29,8 +29,9 @@ export function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-/** `xl` — the width at which the context column docks instead of floating. */
-export const DOCKED_QUERY = "(min-width: 1280px)";
+/** `lg`: the width at which the context column docks instead of floating.
+ *  It was `xl`; see the docked `<aside>` in app/page.tsx for why it moved. */
+export const DOCKED_QUERY = "(min-width: 1024px)";
 
 /**
  * No hover. Row affordances that are revealed on hover — the session overflow

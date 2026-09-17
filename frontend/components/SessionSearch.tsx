@@ -17,10 +17,19 @@ import { cn } from "@/lib/cn";
  * to get out-of-order responses wrong.
  */
 
-/** What the caller is searching: a section's shelf, or one agent's. */
+/**
+ * What the caller is searching: a section's shelf, one agent's, or every
+ * surface at once.
+ *
+ * The third is not "the other two left blank". On the server an absent
+ * `agent_id` filters to `agent_id is null`, which is exactly how Chat and Code
+ * keep the ten specialists out of their own history; searching everywhere has
+ * to ask for it by name. See `scope=all` in `searchSessions`.
+ */
 export type SearchScope =
-  | { section: "chat" | "code"; agentId?: undefined }
-  | { agentId: string; section?: undefined };
+  | { section: "chat" | "code"; agentId?: undefined; all?: undefined }
+  | { agentId: string; section?: undefined; all?: undefined }
+  | { all: true; section?: undefined; agentId?: undefined };
 
 /**
  * The search box's state machine.
@@ -66,6 +75,7 @@ export function useSessionSearch(
     const timer = setTimeout(() => {
       searchSessions(term, token, scope.section ?? "chat", {
         agentId: scope.agentId ?? null,
+        all: scope.all ?? false,
         signal: controller.signal,
       })
         .then((rows) => {
@@ -95,7 +105,7 @@ export function useSessionSearch(
     // writes the scope inline, so a new object identity arrives every render
     // and the effect would re-fire — and re-request — on every keystroke's
     // re-render rather than only when what is being searched changes.
-  }, [term, token, scope.section, scope.agentId]);
+  }, [term, token, scope.section, scope.agentId, scope.all]);
 
   return {
     query,

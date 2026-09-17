@@ -103,7 +103,7 @@ export function NotebookChat({
                       type="button"
                       onClick={() => setDraft(s)}
                       className="rounded-full border border-line bg-elevated px-3 py-1.5 text-2xs
-                                 text-ink-muted transition-all duration-200 hover:border-accent-line
+                                 text-ink-muted transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:border-accent-line
                                  hover:bg-raised hover:text-ink active:scale-[0.98]"
                     >
                       {s}
@@ -179,10 +179,10 @@ export function NotebookChat({
               disabled={!draft.trim() || busy || !ready}
               aria-label="Ask"
               className={cn(
-                "ml-auto grid h-8 w-8 place-items-center rounded-ctl transition-all duration-200",
+                "ml-auto grid h-8 w-8 place-items-center rounded-ctl transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
                 draft.trim() && !busy && ready
                   ? "bg-gradient-to-br from-accent to-accent-alt text-accent-ink hover:brightness-110 active:scale-[0.92]"
-                  : "cursor-not-allowed bg-raised text-ink-dim opacity-55",
+                  : "cursor-not-allowed bg-raised text-ink-subtle opacity-55",
               )}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -254,7 +254,7 @@ function Turn({
             disabled={saved}
             className={cn(
               "mt-2.5 flex h-7 items-center gap-1.5 rounded-ctl border border-line px-2.5",
-              "text-2xs transition-all duration-200",
+              "text-2xs transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
               saved
                 ? "border-accent-line text-accent"
                 : "text-ink-faint opacity-0 hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100",

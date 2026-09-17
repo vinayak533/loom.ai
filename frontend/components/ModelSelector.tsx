@@ -130,7 +130,7 @@ export function ModelSelector({
         // a fact about the choice being made — and the tooltip was the last
         // place the provider was still leaking through, including into the
         // control's accessible name.
-        title={
+        data-tip={
           isAuto
             ? taskRouted
               ? resolved
@@ -160,7 +160,7 @@ export function ModelSelector({
         {isAuto && resolved && (
           <span
             className="max-w-0 overflow-hidden whitespace-nowrap text-ink-faint opacity-0
-                       transition-all duration-250 ease-out
+                       transition-[max-width,opacity] duration-250 ease-out
                        group-hover:max-w-[9rem] group-hover:opacity-100"
           >
             · {resolved.name}
@@ -251,7 +251,7 @@ export function ModelSelector({
                   onClick={() => pick(m.id)}
                   // The Auto pool's models say what they are for. They stay
                   // hand-pickable; Auto is just the better default.
-                  title={m.description ?? undefined}
+                  data-tip={m.description ?? undefined}
                   className={cn(
                     "flex w-full items-center gap-2.5 rounded-ctl px-2 py-2 text-left text-sm",
                     "transition-colors duration-200",

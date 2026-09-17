@@ -41,6 +41,22 @@ SERVER -> CLIENT
     # the stopped state) from "it compiled with an error but is still serving"
     # (keep the iframe, raise a banner over it).
 {"type": "preview_stopped",       "port": 3000|null, "reason": "..."}
+{"type": "terminal_started",     "call_id": "term_...", "command": "ls -la"}
+{"type": "terminal_exit",        "call_id": "term_...", "exit_code": 0,
+                                  "timed_out": false}
+    # A command the *user* typed into the Code section's terminal panel, not
+    # one the agent issued. Its output streams as `tool_output_chunk` frames
+    # carrying the same `call_id`, so the panel renders both kinds of command
+    # through one path; the two frames above are what mark it as the user's
+    # and keep it out of the transcript, where it was never a tool call.
+{"type": "turn_commit",          "sha": "...", "short": "ab12cd3", "subject": "...",
+                                  "branch": "main", "files": ["/home/user/x"],
+                                  "pushed": true, "remote": "https://...",
+                                  "error": ""}
+    # The end-of-turn auto commit in a Code session whose repository has
+    # opted in (see `tools/git.py` and `autocommit.py`). `pushed` is false with
+    # `error` set when the commit landed but the push did not; a turn that
+    # changed nothing emits no frame at all.
 {"type": "usage",                 "input_tokens": 0, "output_tokens": 0,
                                    "cost_estimate": 0.0}
 {"type": "agent_done",            "iterations": 3, "reason": "end_turn"}
@@ -122,6 +138,12 @@ CLIENT -> SERVER
 {"type": "set_model",   "model_id": "auto | qwen3_7_plus | mimo_v2_5 | ..."}
     # "auto" is a routing mode, not a model: the backend then classifies each
     # turn and picks for itself. Any other id pins the session to that model.
+{"type": "terminal_command", "command": "npm test"}
+    # A shell command the user typed into the terminal panel. Runs in the
+    # session's sandbox — the same one the agent's tools use, through the same
+    # lifecycle — and streams back as `terminal_started` / `tool_output_chunk`
+    # / `terminal_exit`. One at a time per socket: a second command while one
+    # is running is refused with an `error` frame rather than queued.
 {"type": "cancel"}
     # A *request* to stop, not an interrupt. The run finishes the frame it is
     # on, keeps the partial answer, closes any tool call that had not started,
@@ -176,6 +198,9 @@ EventType = Literal[
     "tool_budget_reached",
     "model_changed",
     "error",
+    "terminal_started",
+    "terminal_exit",
+    "turn_commit",
     # --- Agentic Loop only ---
     "agent_meta",
     "agent_paused",
@@ -251,6 +276,8 @@ def git_state(
     status: list,
     log: list,
     path: str = "",
+    remote: str | None = None,
+    auto_push: bool = False,
 ) -> dict:
     """The session's git state, as the Code panel's history sidebar shows it.
 
@@ -258,9 +285,61 @@ def git_state(
     history (a `git` tool call, or the UI's own commit action), so the panel is
     correct without asking. `repo=False` means no repository exists yet, which
     the panel renders as an offer to start one rather than as an empty list.
+
+    ``remote`` is the URL of `origin` or ``None``; ``auto_push`` is whether
+    the repository has opted into the end-of-turn commit-and-push. Both live
+    in the repository's own config, so they travel with it and go when it goes.
     """
     return event(
-        "git_state", repo=repo, branch=branch or "", status=status, log=log, path=path
+        "git_state",
+        repo=repo,
+        branch=branch or "",
+        status=status,
+        log=log,
+        path=path,
+        remote=remote or None,
+        auto_push=bool(auto_push),
+    )
+
+
+def terminal_started(call_id: str, command: str) -> dict:
+    """A command the user typed into the terminal panel has begun running."""
+    return event("terminal_started", call_id=call_id, command=command)
+
+
+def terminal_exit(call_id: str, exit_code: int, timed_out: bool = False) -> dict:
+    return event(
+        "terminal_exit", call_id=call_id, exit_code=int(exit_code), timed_out=timed_out
+    )
+
+
+def turn_commit(
+    sha: str,
+    short: str,
+    subject: str,
+    branch: str,
+    files: list[str],
+    pushed: bool,
+    remote: str | None,
+    error: str = "",
+) -> dict:
+    """The commit an opted-in Code session made at the end of a turn.
+
+    This is the turn summary — what Claude Code prints after it commits — and
+    it is the user's one chance to see what was just recorded and pushed
+    without opening git themselves. `files` are absolute sandbox paths so the
+    client can open the tree to them.
+    """
+    return event(
+        "turn_commit",
+        sha=sha,
+        short=short,
+        subject=subject,
+        branch=branch,
+        files=list(files),
+        pushed=bool(pushed),
+        remote=remote or None,
+        error=error or "",
     )
 
 
@@ -426,6 +505,26 @@ def model_changed(
 
 
 def error(message: str) -> dict:
+    return event("error", message=message)
+
+
+def notice(message: str) -> dict:
+    """Something the user needs told, which is not a failure of the run.
+
+    This function did not exist, and `app/api/ws.py` has called it since the
+    stored-model fallback was written — so every connect that found a stale
+    `sessions.model_id` raised `AttributeError` out of the connect handler
+    instead of saying the model had moved. Nothing caught it because nothing
+    expected a constructor to be missing.
+
+    Emitted on the `error` channel because that is the only one the frontend
+    turns into a standalone notice item today: `useAgentSocket` builds
+    `kind: "notice"` from `error`, `max_iterations` and `tool_budget_reached`,
+    and an event type it does not know is dropped — which for an advisory
+    means the user simply never sees it. A dedicated wire type would let these
+    render at `warn` rather than `error` severity and is worth adding next time
+    the frontend is open; visible and a shade too red beats invisible.
+    """
     return event("error", message=message)
 
 

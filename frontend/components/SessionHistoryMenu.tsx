@@ -58,7 +58,6 @@ export function SessionHistoryMenu({
   onMoveToProject?: (projectId: string | null) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [confirming, setConfirming] = useState(false);
   /**
    * The project picker replaces the menu body in place, the same way the
    * delete confirm does. A flyout submenu inside a 172px panel that already
@@ -93,7 +92,6 @@ export function SessionHistoryMenu({
   // project picker — is a trap.
   useEffect(() => {
     if (!open) {
-      setConfirming(false);
       setPicking(false);
     }
   }, [open]);
@@ -119,7 +117,7 @@ export function SessionHistoryMenu({
         }}
         className={cn(
           "grid h-7 w-7 place-items-center rounded-ctl text-ink-faint",
-          "transition-all duration-200 hover:bg-raised hover:text-ink",
+          "transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:bg-raised hover:text-ink",
           "focus-visible:opacity-100",
           open
             ? "bg-raised text-ink opacity-100"
@@ -219,35 +217,14 @@ export function SessionHistoryMenu({
               <div className="my-1 h-px bg-line" />
             )}
 
-            {!actions.includes("delete") ? null : confirming ? (
-              // The confirm replaces the row in place — the menu stays the
-              // same size and the pointer does not have to travel.
-              <div className="px-2 pb-1 pt-0.5">
-                <p className="pb-1.5 text-2xs leading-snug text-ink-muted">
-                  Delete permanently?
-                </p>
-                <div className="flex gap-1">
-                  <button
-                    type="button"
-                    onClick={() => run("delete")}
-                    className="h-7 flex-1 rounded-ctl bg-del/15 text-2xs font-medium text-del
-                               transition-colors duration-150 hover:bg-del/25"
-                  >
-                    Delete
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirming(false)}
-                    className="h-7 flex-1 rounded-ctl text-2xs text-ink-muted
-                               transition-colors duration-150 hover:bg-raised hover:text-ink"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            ) : (
+            {/* No confirm step. Deletion is reversible from the toast it
+                raises (six seconds of Undo), which covers the accidental
+                case better than a second click and taxes the intentional one
+                not at all. The sandbox file tree keeps its confirm, because
+                a deleted file genuinely cannot come back. */}
+            {actions.includes("delete") && (
               <MenuItem
-                onClick={() => setConfirming(true)}
+                onClick={() => run("delete")}
                 icon={<TrashIcon />}
                 label="Delete"
                 danger

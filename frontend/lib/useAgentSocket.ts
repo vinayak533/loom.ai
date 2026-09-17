@@ -20,7 +20,7 @@ import type {
   SearchResult,
   ServerEvent,
 } from "./events";
-import { fetchHistory, fetchWorkspaceTree, socketUrl } from "./api";
+import { fetchHistory, fetchWorkspaceTree, socketProtocols, socketUrl } from "./api";
 import { agentSocketUrl, fetchAgentHistory } from "./agents";
 import { itemsFromHistory, usageFromHistory } from "./history";
 
@@ -111,6 +111,24 @@ export type ChatItem =
       nextAgentName: string;
       reason: string;
       context: string;
+    }
+  /**
+   * Code section. The end-of-turn auto commit — the turn summary Claude Code
+   * prints after it commits. A card rather than a notice because it carries
+   * a hash worth copying and a push that can have failed while the commit
+   * succeeded, and both of those need to be read, not glanced at.
+   */
+  | {
+      kind: "commit";
+      id: string;
+      sha: string;
+      short: string;
+      subject: string;
+      branch: string;
+      files: string[];
+      pushed: boolean;
+      remote: string | null;
+      error: string;
     };
 
 /** Which specialist a session belongs to, announced on connect. */
@@ -225,6 +243,10 @@ export type GitState = {
   status: GitChange[];
   log: GitCommit[];
   path: string;
+  /** URL of `origin`, or null when none is set. */
+  remote: string | null;
+  /** Whether the repository commits and pushes at the end of every turn. */
+  auto_push: boolean;
 } | null;
 
 export type AgentState = {
@@ -232,9 +254,32 @@ export type AgentState = {
   connected: boolean;
   items: ChatItem[];
   terminal: TerminalLine[];
+  /** An agent-issued shell command is running. */
   terminalBusy: boolean;
+  /**
+   * A command the *user* typed is running. Separate from `terminalBusy` so
+   * `agent_done` — which clears the agent's flag — cannot mark a user's
+   * `npm install` as finished while it is still streaming.
+   */
+  terminalCommandRunning: boolean;
+  /**
+   * Bumped on every end-of-turn commit. The shell watches it to bring the
+   * file tree into view, opened to the files that were just recorded — the
+   * "open the project folder" half of the auto-commit.
+   */
+  commitSignal: number;
   tree: FileNode[];
   treeRoot: string;
+  /**
+   * True when this session has run before but its sandbox is not up now.
+   *
+   * `tree` is empty in two unrelated situations — a session that has never run
+   * anything, and one whose sandbox has since been reaped — and the panel has
+   * to say different things about them. Only the second is recoverable by
+   * simply carrying on, and telling a returning user the same "nothing here
+   * yet" as a brand-new one reads as their work having been lost.
+   */
+  sandboxIdle: boolean;
   /** Repository state, or null until the server has told us. */
   git: GitState;
   /**
@@ -266,6 +311,13 @@ export type AgentState = {
   flash: Record<string, number>;
   activeFile: string | null;
   usage: { input: number; output: number; cost: number };
+  /**
+   * Tokens spent per turn, oldest first, for the Pulse sparkline. `usage`
+   * events carry running totals, so each entry is the delta since the last.
+   */
+  usageHistory: number[];
+  /** Credits spent per turn, for the Agents balance sparkline. */
+  creditHistory: number[];
   iterations: number;
   lastError: string | null;
   modelId: string;
@@ -311,8 +363,11 @@ const initialState: AgentState = {
   items: [],
   terminal: [],
   terminalBusy: false,
+  terminalCommandRunning: false,
+  commitSignal: 0,
   tree: [],
   treeRoot: "/home/user",
+  sandboxIdle: false,
   git: null,
   artifacts: {},
   artifactToOpen: null,
@@ -321,6 +376,8 @@ const initialState: AgentState = {
   flash: {},
   activeFile: null,
   usage: { input: 0, output: 0, cost: 0 },
+  usageHistory: [],
+  creditHistory: [],
   iterations: 0,
   lastError: null,
   modelId: "qwen3_7_plus",
@@ -369,6 +426,7 @@ type Action =
       iterations: number;
       replace?: boolean;
     }
+  | { t: "sandboxIdle"; idle: boolean }
   /** A tree fetched over HTTP after the user changed the filesystem. */
   | { t: "applyTree"; path: string; nodes: FileNode[] }
   /** A path the user renamed (`to`) or deleted (`to: null`) in the tree. */
@@ -526,7 +584,17 @@ function reducer(state: AgentState, action: Action): AgentState {
       };
 
     case "applyTree":
-      return { ...state, tree: action.nodes, treeRoot: action.path };
+      // A tree arriving is proof the sandbox is up, whatever we believed a
+      // moment ago.
+      return {
+        ...state,
+        tree: action.nodes,
+        treeRoot: action.path,
+        sandboxIdle: false,
+      };
+
+    case "sandboxIdle":
+      return { ...state, sandboxIdle: action.idle };
 
     case "seedArtifacts": {
       // Fetched rows never win over what the socket already delivered: the
@@ -857,10 +925,89 @@ function applyEvent(state: AgentState, e: ServerEvent): AgentState {
           status: e.status,
           log: e.log,
           path: e.path,
+          remote: e.remote ?? null,
+          auto_push: Boolean(e.auto_push),
         },
       };
 
-    case "usage":
+    // A command the user typed. It lands in the terminal exactly as an
+    // agent's would — a `$ line`, the streamed output, an exit line — but
+    // never in the transcript, because nothing the agent did produced it.
+    case "terminal_started":
+      return {
+        ...state,
+        terminalCommandRunning: true,
+        terminal: [
+          ...state.terminal,
+          { id: uid("l"), callId: e.call_id, stream: "meta" as const, text: `$ ${e.command}` },
+        ].slice(-2000),
+      };
+
+    case "terminal_exit":
+      return {
+        ...state,
+        terminalCommandRunning: false,
+        terminal: [
+          ...state.terminal,
+          {
+            id: uid("l"),
+            callId: e.call_id,
+            stream: (e.exit_code === 0 ? "meta" : "stderr") as TerminalLine["stream"],
+            text: e.timed_out ? "[timed out]" : `[exit ${e.exit_code}]`,
+          },
+        ].slice(-2000),
+      };
+
+    case "turn_commit": {
+      // A commit that never happened is a warning on the thread, not a card
+      // with an empty hash in it.
+      if (!e.sha) {
+        return {
+          ...state,
+          items: [
+            ...closeStreaming(state.items),
+            {
+              kind: "notice",
+              id: uid("n"),
+              level: "warn",
+              text: e.error || "The end-of-turn commit did not happen.",
+            },
+          ],
+        };
+      }
+      // Flashing the committed paths is what opens their folders in the
+      // tree — the same mechanism a `file_changed` uses, reused on purpose so
+      // "the files this turn recorded" and "the files this turn touched" are
+      // the same gesture.
+      const flash = { ...state.flash };
+      for (const path of e.files) flash[path] = e.ts;
+      return {
+        ...state,
+        flash,
+        commitSignal: state.commitSignal + 1,
+        items: [
+          ...closeStreaming(state.items),
+          {
+            kind: "commit",
+            id: uid("c"),
+            sha: e.sha,
+            short: e.short,
+            subject: e.subject,
+            branch: e.branch,
+            files: e.files,
+            pushed: e.pushed,
+            remote: e.remote,
+            error: e.error,
+          },
+        ],
+      };
+    }
+
+    case "usage": {
+      // Running totals on the wire; the sparkline wants the spend per turn.
+      const before = state.usage.input + state.usage.output;
+      const after = e.input_tokens + e.output_tokens;
+      const delta = Math.max(0, after - before);
       return {
         ...state,
         usage: {
@@ -868,7 +1015,9 @@ function applyEvent(state: AgentState, e: ServerEvent): AgentState {
           output: e.output_tokens,
           cost: e.cost_estimate,
         },
+        usageHistory: delta > 0 ? [...state.usageHistory, delta].slice(-40) : state.usageHistory,
       };
+    }
 
     case "agent_done":
       return {
@@ -1034,15 +1183,30 @@ function applyEvent(state: AgentState, e: ServerEvent): AgentState {
         ],
       };
 
-    case "credits":
+    case "credits": {
+      // A turn's spend grows across its credits events; the sparkline keeps
+      // one point per turn, so the latest point is replaced while the turn is
+      // still open and a new point starts when the spend resets.
+      const spent = e.spent_this_turn;
+      const prev = state.credits?.spentThisTurn ?? 0;
+      let creditHistory = state.creditHistory;
+      if (spent > 0) {
+        creditHistory =
+          spent >= prev && prev > 0
+            ? [...state.creditHistory.slice(0, -1), spent]
+            : [...state.creditHistory, spent];
+        creditHistory = creditHistory.slice(-40);
+      }
       return {
         ...state,
         credits: {
           balance: e.balance,
-          spentThisTurn: e.spent_this_turn,
+          spentThisTurn: spent,
           enabled: e.enabled,
         },
+        creditHistory,
       };
+    }
 
     // The run continues — the agent is writing up without its tools — so this
     // only adds the notice explaining why the answer stops where it does.
@@ -1155,6 +1319,7 @@ export function useAgentSocket(
         agentId
           ? agentSocketUrl(sessionId, agentId, token)
           : socketUrl(sessionId, token, section),
+        socketProtocols(token),
       );
       socketRef.current = ws;
 
@@ -1239,7 +1404,20 @@ export function useAgentSocket(
         // The tree only when a sandbox is actually up. Reading it would
         // otherwise *create* one on every page load, for sessions nobody has
         // opened — `sandbox_id` is non-null exactly when one is live.
-        if (!history.sandbox_id) return;
+        //
+        // When it is not, say which kind of empty this is. A session with
+        // history behind it has a workspace; the sandbox holding it has just
+        // been reaped, which happens on an idle timeout and on something as
+        // ordinary as switching to another section and back. Without this the
+        // panel greeted a returning user with the copy written for their very
+        // first visit.
+        if (!history.sandbox_id) {
+          dispatch({
+            t: "sandboxIdle",
+            idle: !agentId && itemsFromHistory(history).length > 0,
+          });
+          return;
+        }
         fetchWorkspaceTree(sessionId, token)
           .then((tree) => {
             if (!closedByUs.current) {
@@ -1398,13 +1576,35 @@ export function useAgentSocket(
       status: GitChange[];
       log: GitCommit[];
       path: string;
+      remote?: string | null;
+      auto_push?: boolean;
     }) =>
       dispatch({
         t: "applyGitState",
-        git: { ...snapshot, branch: snapshot.branch ?? "" },
+        git: {
+          ...snapshot,
+          branch: snapshot.branch ?? "",
+          remote: snapshot.remote ?? null,
+          auto_push: Boolean(snapshot.auto_push),
+        },
       }),
     [],
   );
+
+  /**
+   * A shell command typed into the terminal panel.
+   *
+   * Sent over the socket rather than a REST call so its output streams back
+   * on the same connection the agent's does, into the same panel, through
+   * the same reducer cases — the terminal is one terminal, whoever typed.
+   * Returns false when the socket is down, so the panel can keep the text.
+   */
+  const runCommand = useCallback((command: string) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type: "terminal_command", command }));
+    return true;
+  }, []);
   const reloadPreview = useCallback(() => dispatch({ t: "reloadPreview" }), []);
   const dismissPreviewError = useCallback(
     () => dispatch({ t: "dismissPreviewError" }),
@@ -1454,6 +1654,7 @@ export function useAgentSocket(
     openFile,
     openContent,
     clearTerminal,
+    runCommand,
     dismissToast,
     applyGitState,
     reloadPreview,

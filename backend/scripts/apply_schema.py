@@ -72,6 +72,7 @@ EXPECTED: list[tuple[str, str | None]] = [
     ("user_credits", "balance"),
     ("credit_ledger", None),
     ("credit_ledger", "agent_id"),
+    ("credit_ledger", "balance_applied"),
     ("agent_approvals", None),
     ("agent_approvals", "decision"),
     # Message actions. `message_branches` is what makes an edit non-destructive

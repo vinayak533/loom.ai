@@ -1,9 +1,10 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { SECTIONS, SECTION_META, type Section } from "@/lib/sections";
+import { SECTIONS, SECTION_ACCENT, SECTION_META, type Section } from "@/lib/sections";
 import { cn } from "@/lib/cn";
 import { SPRING_SOFT, useMotionOK } from "./Anim";
+import { Tooltip } from "./Tooltip";
 
 /**
  * The four modes. Each row carries its own accent so the identity reads
@@ -23,28 +24,13 @@ import { SPRING_SOFT, useMotionOK } from "./Anim";
  * cross-section transition in the app, which is exactly why it should be the
  * one that reads as continuous.
  */
-const NAV_ACCENT: Record<Section, { mark: string; soft: string; icon: string }> = {
-  chat: {
-    mark: "bg-[#8AA9FF]",
-    soft: "bg-[rgba(138,169,255,0.11)]",
-    icon: "text-[#8AA9FF]",
-  },
-  learning: {
-    mark: "bg-[#F0B54A]",
-    soft: "bg-[rgba(240,181,74,0.10)]",
-    icon: "text-[#F0B54A]",
-  },
-  code: {
-    mark: "bg-[#5BE0A0]",
-    soft: "bg-[rgba(91,224,160,0.09)]",
-    icon: "text-[#5BE0A0]",
-  },
-  agents: {
-    mark: "bg-[#B28AFF]",
-    soft: "bg-[rgba(178,138,255,0.10)]",
-    icon: "text-[#B28AFF]",
-  },
-};
+// Each row sets `--nav-acc` from `SECTION_ACCENT` and the three classes
+// below read it. This used to be six literal hex values that could not follow
+// the token layer; now the only place an accent is spelled out is
+// `lib/sections.ts`, beside the CSS it has to match.
+const ROW_MARK = "bg-[rgb(var(--nav-acc))]";
+const ROW_SOFT = "bg-[rgb(var(--nav-acc)/0.10)]";
+const ROW_ICON = "text-[rgb(var(--nav-acc))]";
 
 export function SectionNav({
   active,
@@ -65,14 +51,14 @@ export function SectionNav({
       {!collapsed && <p className="voice-label px-3 pb-2">Modes</p>}
       {SECTIONS.map((s) => {
         const on = s === active;
-        const a = NAV_ACCENT[s];
-        return (
+        const row = (
           <button
             key={s}
             type="button"
             onClick={() => onSelect(s)}
             aria-current={on ? "page" : undefined}
-            title={collapsed ? SECTION_META[s].name : undefined}
+            aria-label={collapsed ? SECTION_META[s].name : undefined}
+            style={{ "--nav-acc": SECTION_ACCENT[s] } as React.CSSProperties}
             className={cn(
               "relative flex items-center gap-3 rounded-ctl text-sm font-medium",
               "transition-colors duration-200 ease-out active:scale-[0.94]",
@@ -88,7 +74,7 @@ export function SectionNav({
                   layoutId={`nav-tint-${collapsed ? "rail" : "full"}`}
                   transition={travel}
                   aria-hidden
-                  className={cn("absolute inset-0 rounded-ctl", a.soft)}
+                  className={cn("absolute inset-0 rounded-ctl", ROW_SOFT)}
                 />
                 <motion.span
                   layoutId={`nav-mark-${collapsed ? "rail" : "full"}`}
@@ -97,18 +83,25 @@ export function SectionNav({
                   className={cn(
                     "sigil absolute top-1/2 h-[7px] w-[7px] -translate-y-1/2",
                     collapsed ? "-left-[7px]" : "left-0",
-                    a.mark,
+                    ROW_MARK,
                   )}
                 />
               </>
             )}
-            <span className={cn("relative shrink-0 transition-colors duration-200", on && a.icon)}>
+            <span className={cn("relative shrink-0 transition-colors duration-200", on && ROW_ICON)}>
               <SectionIcon section={s} />
             </span>
             {!collapsed && (
               <span className="relative whitespace-nowrap">{SECTION_META[s].name}</span>
             )}
           </button>
+        );
+        return collapsed ? (
+          <Tooltip key={s} label={SECTION_META[s].name} side="right">
+            {row}
+          </Tooltip>
+        ) : (
+          row
         );
       })}
     </div>

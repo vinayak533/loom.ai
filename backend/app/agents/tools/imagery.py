@@ -90,8 +90,14 @@ _RATIO_ALIASES: dict[str, str] = {
     "ultrawide": "21:9", "cinematic": "21:9", "cinemascope": "21:9",
 }
 
-_RATIO_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[:xX×/]\s*(\d+(?:\.\d+)?)")
-_DIMS_RE = re.compile(r"(\d{3,5})\s*[x×*]\s*(\d{3,5})")
+#: A leading `-` is captured deliberately, and then refused below. Without it
+#: `search` simply skipped the sign: `-4:3` matched as `4:3` and came back as a
+#: confident, exact 4:3 — while `0:0` and outright garbage were correctly
+#: refused. A dimension cannot be negative, so a negative one means the caller
+#: sent something it did not mean, and snapping it to a plausible ratio hides
+#: that instead of surfacing it.
+_RATIO_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*[:xX×/]\s*(-?\d+(?:\.\d+)?)")
+_DIMS_RE = re.compile(r"(-?\d{3,5})\s*[x×*]\s*(-?\d{3,5})")
 
 
 async def normalize_aspect_ratio(ctx: ToolContext, args: dict) -> ToolResult:
@@ -119,21 +125,50 @@ async def normalize_aspect_ratio(ctx: ToolContext, args: dict) -> ToolResult:
                 break
 
     numeric: float | None = None
+    #: Set when the input parsed but described something no image can be. Kept
+    #: apart from "did not parse at all" so the refusal can say which.
+    impossible = ""
     if ratio is None:
         dims = _DIMS_RE.search(raw)
         pair = _RATIO_RE.search(raw)
         if dims:
-            numeric = int(dims.group(1)) / max(int(dims.group(2)), 1)
-            matched_by = f"pixel dimensions {dims.group(1)}x{dims.group(2)}"
+            width, height = int(dims.group(1)), int(dims.group(2))
+            if width <= 0 or height <= 0:
+                impossible = f"{dims.group(1)}x{dims.group(2)}"
+            else:
+                numeric = width / height
+                matched_by = f"pixel dimensions {width}x{height}"
         elif pair:
-            numeric = float(pair.group(1)) / max(float(pair.group(2)), 1e-9)
-            matched_by = f"ratio {pair.group(1)}:{pair.group(2)}"
+            left, right = float(pair.group(1)), float(pair.group(2))
+            # Both components checked, not just the quotient. A `4:-3` divides
+            # to a negative and would be caught anyway, but `-4:-3` divides to a
+            # perfectly positive 1.333 and would have snapped to 4:3 — the same
+            # silent acceptance, one sign further along.
+            if left <= 0 or right <= 0:
+                impossible = f"{pair.group(1)}:{pair.group(2)}"
+            else:
+                numeric = left / right
+                matched_by = f"ratio {pair.group(1)}:{pair.group(2)}"
         elif _is_number(lowered):
-            numeric = float(lowered)
-            matched_by = f"decimal {lowered}"
+            value = float(lowered)
+            if value <= 0:
+                impossible = lowered
+            else:
+                numeric = value
+                matched_by = f"decimal {lowered}"
 
         if numeric is not None and numeric > 0:
             ratio = _nearest(numeric)
+
+    if ratio is None and impossible:
+        return ToolResult(
+            f"Error: `{raw}` is not a usable aspect ratio — `{impossible}` has "
+            "a zero or negative side, and an image cannot have one. Supported: "
+            f"{', '.join(SUPPORTED_RATIOS)}. Ask the user which they meant "
+            "rather than guessing at the sign.",
+            success=False,
+            meta={"supported": list(SUPPORTED_RATIOS), "rejected": impossible},
+        )
 
     if ratio is None:
         return ToolResult(

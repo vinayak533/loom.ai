@@ -335,7 +335,7 @@ function SaveBar({
           "min-w-0 flex-1 truncate font-sans text-2xs",
           status === "error" ? "text-del" : "text-ink-faint",
         )}
-        title={message ?? undefined}
+        data-tip={message ?? undefined}
       >
         {message ??
           (status === "saving"
@@ -361,7 +361,7 @@ function SaveBar({
         onClick={onSave}
         disabled={disabled || status === "saving" || (!dirty && status !== "idle")}
         className={cn(
-          "shrink-0 rounded-ctl px-2.5 py-1 text-2xs font-medium transition-all duration-200",
+          "shrink-0 rounded-ctl px-2.5 py-1 text-2xs font-medium transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
           dirty
             ? "bg-accent text-accent-ink hover:brightness-110 active:scale-[0.96]"
             : "bg-raised text-ink-faint",

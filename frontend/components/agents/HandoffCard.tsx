@@ -108,7 +108,7 @@ export function HandoffCard({
               }}
               disabled={taken}
               className={cn(
-                "h-8 rounded-ctl px-3.5 font-sans text-2xs font-semibold transition-all duration-200",
+                "h-8 rounded-ctl px-3.5 font-sans text-2xs font-semibold transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
                 "text-accent-ink hover:brightness-110 active:scale-[0.97]",
                 "disabled:pointer-events-none disabled:opacity-50",
               )}

@@ -42,7 +42,20 @@ export const SessionListItem = memo(function SessionListItem({
       layout={motionOK}
       initial={motionOK ? { opacity: 0, x: -8 } : false}
       animate={{ opacity: 1, x: 0 }}
-      exit={motionOK ? { opacity: 0, height: 0 } : { opacity: 0 }}
+      // The exit is a bounded tween, not the spring the rest of the row uses.
+      // A spring animating `height` from `auto` to 0 never reaches rest here,
+      // so `AnimatePresence` never got its exit-complete and the rows never
+      // unmounted — they sat at ~0.1 opacity and 3px tall, still hit-testable.
+      // Harmless-looking with one row; not with fifty. Switching section
+      // replaces the whole list at once, and every row of the section you just
+      // left stayed in the flyout of the one you arrived at: Code's sessions
+      // listed under Chat, each still a live button that would open a Code
+      // session into Chat's slot. A duration guarantees the exit finishes.
+      exit={
+        motionOK
+          ? { opacity: 0, height: 0, transition: { duration: 0.16, ease: "easeOut" } }
+          : { opacity: 0 }
+      }
       transition={motionOK ? SPRING : { duration: 0 }}
       className="group relative"
     >

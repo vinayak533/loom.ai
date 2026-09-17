@@ -3,6 +3,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
 import {
+  type Note,
   addNote as apiAddNote,
   addSource as apiAddSource,
   ask as apiAsk,
@@ -25,6 +26,7 @@ import {
 import type { HistoryAction } from "../SessionHistoryMenu";
 import { SPRING_SOFT, useMotionOK } from "../Anim";
 import { cn } from "@/lib/cn";
+import { useToast } from "../Toast";
 import { CoursePlatform } from "./CoursePlatform";
 import { NotebookLibrary } from "./NotebookLibrary";
 import { NotebookWorkspace, type WorkspaceMode } from "./NotebookWorkspace";
@@ -66,7 +68,10 @@ export function LearnSection({ token }: { token: string | null }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-line px-4 py-2 sm:px-6">
+      {/* Sits directly under the page header, so it takes the page header's
+          own height and gutter: the tab labels line up with the section name
+          above them instead of landing 24px off it. */}
+      <div className="flex h-bar shrink-0 items-center gap-1 border-b border-line px-gutter">
         <div role="tablist" aria-label="Learn surface" className="flex gap-0.5 rounded-ctl bg-inset p-0.5">
           {(
             [
@@ -231,6 +236,8 @@ function NotebookSection({
     }
   }, [token, fail]);
 
+  const toast = useToast();
+
   const notebookAction = useCallback(
     async (id: string, action: HistoryAction) => {
       // Pin is not offered on notebooks — the library grid has no top to pin
@@ -241,18 +248,33 @@ function NotebookSection({
       setNotebooks((current) => current.filter((n) => n.id !== id));
       if (id === openId) setOpenId(null);
 
+      if (action === "delete") {
+        // Reversible: the card leaves now, the server is asked in six
+        // seconds unless Undo puts it back. See `removeSession` in page.tsx.
+        toast.undoable(`Deleted “${row?.title?.trim() || "notebook"}”`, {
+          revert: () => {
+            if (row) setNotebooks((cur) => (cur.some((n) => n.id === id) ? cur : [row, ...cur]));
+          },
+          commit: async () => {
+            try {
+              await apiDeleteNotebook(id, token);
+            } catch (err) {
+              fail(err);
+            }
+            refresh();
+          },
+        });
+        return;
+      }
+
       try {
-        if (action === "delete") {
-          await apiDeleteNotebook(id, token);
-        } else {
-          await apiUpdateNotebook(id, { is_archived: !row?.is_archived }, token);
-        }
+        await apiUpdateNotebook(id, { is_archived: !row?.is_archived }, token);
       } catch (err) {
         fail(err);
       }
       refresh();
     },
-    [notebooks, openId, token, refresh, fail],
+    [notebooks, openId, token, refresh, fail, toast],
   );
 
   const rename = useCallback(
@@ -381,12 +403,24 @@ function NotebookSection({
   const deleteNote = useCallback(
     async (noteId: string) => {
       if (!openId) return;
-      setWorkspace((w) =>
-        w ? { ...w, notes: w.notes.filter((n) => n.id !== noteId) } : w,
-      );
-      await apiDeleteNote(openId, noteId, token).catch(fail);
+      const notebookId = openId;
+      let removed: Note | undefined;
+      setWorkspace((w) => {
+        if (!w) return w;
+        removed = w.notes.find((n) => n.id === noteId);
+        return { ...w, notes: w.notes.filter((n) => n.id !== noteId) };
+      });
+      toast.undoable("Note deleted", {
+        revert: () =>
+          setWorkspace((w) =>
+            w && removed && !w.notes.some((n) => n.id === noteId)
+              ? { ...w, notes: [removed, ...w.notes] }
+              : w,
+          ),
+        commit: () => apiDeleteNote(notebookId, noteId, token).catch(fail),
+      });
     },
-    [openId, token, fail],
+    [openId, token, fail, toast],
   );
 
   const generateCourse = useCallback(async () => {

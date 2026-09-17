@@ -16,6 +16,7 @@ from app import credits  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.db import repository  # noqa: E402
 from app.llm_router import validate_keys  # noqa: E402
+from app.security import BodySizeLimitMiddleware, SecurityHeadersMiddleware  # noqa: E402
 from app.tools.preview import preview_manager  # noqa: E402
 from app.tools.sandbox import sandbox_manager  # noqa: E402
 
@@ -62,12 +63,14 @@ async def lifespan(app: FastAPI):
 
 
 def validate_credit_pricing() -> None:
-    """Refuse to boot quietly on a pricing table that cannot charge correctly.
+    """Refuse to boot on a pricing table that cannot charge correctly.
 
     A wrong surcharge is worse than a missing one: it looks metered and bills
-    the wrong amount for as long as nobody audits the ledger. So this is loud
+    the wrong amount for as long as nobody audits the ledger. So this is fatal
     at boot, where it costs nothing to fix — the alternative is discovering it
     in a reconciliation months later.
+
+    Raises :class:`RuntimeError` when the tables disagree.
     """
     problems = credits.validate_pricing()
     if not problems:
@@ -80,10 +83,26 @@ def validate_credit_pricing() -> None:
         return
     for problem in problems:
         log.error("CREDIT PRICING: %s", problem)
-    log.error(
-        "Credits: the pricing table above is inconsistent. `generate_image` "
-        "will refuse to run rather than charge a guessed amount. Fix "
-        "`credits.STABILITY_CREDITS_PER_IMAGE` or STABILITY_MODEL."
+
+    # Fatal, not a warning. This used to log and carry on, which meant the
+    # process started, served, accepted image requests, and failed every one of
+    # them at the moment of charging — with an exception surfaced to a user who
+    # had already waited for a render. Every one of those failures traces back
+    # to a single line of configuration that was wrong before the first request
+    # arrived, and the boot log said so in a line nobody was watching.
+    #
+    # Refusing to start turns that into an unmissable failure at the one moment
+    # it is trivially fixable, and costs nothing legitimate: the only way here
+    # is a STABILITY_MODEL that is not one of the priced models, or an endpoint
+    # added to `imagery.py` without a price beside it.
+    raise RuntimeError(
+        "Credit pricing is inconsistent and the server will not start:\n  - "
+        + "\n  - ".join(problems)
+        + "\n\nSet STABILITY_MODEL to one of "
+        + ", ".join(sorted(credits.STABILITY_CREDITS_PER_IMAGE))
+        + ", or add the missing per-image price to "
+        "`credits.STABILITY_CREDITS_PER_IMAGE` from "
+        "platform.stability.ai/pricing."
     )
 
 
@@ -139,8 +158,17 @@ app.add_middleware(
     # added here too — a missing one fails as an opaque "Failed to fetch" in the
     # browser, with the preflight rejection never reaching application code.
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    # The two headers the client actually sends. `["*"]` with credentials on
+    # is broader than any route here needs.
+    allow_headers=["Authorization", "Content-Type"],
+    expose_headers=["Retry-After"],
 )
+
+# Middleware runs in reverse order of registration: the body-size gate is
+# added last so it runs first, before CORS has done any work on a request
+# that is about to be refused anyway.
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(BodySizeLimitMiddleware)
 
 app.include_router(rest.router)
 app.include_router(learn.router)

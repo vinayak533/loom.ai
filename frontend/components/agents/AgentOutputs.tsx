@@ -153,8 +153,8 @@ function Field({
           type="button"
           onClick={copy}
           className={cn(
-            "ml-auto rounded-[6px] border border-line px-2 py-0.5 font-sans text-[0.5625rem]",
-            "text-ink-faint opacity-0 transition-all duration-200",
+            "ml-auto rounded-[6px] border border-line px-2 py-0.5 font-sans text-2xs",
+            "text-ink-faint opacity-0 transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
             "group-hover:opacity-100 focus-visible:opacity-100 hover:border-line-strong hover:text-ink",
             copied && "border-add/40 text-add opacity-100",
           )}
@@ -370,7 +370,7 @@ export function CitationList({
           </ul>
         </div>
       ))}
-      <p className="font-sans text-2xs leading-relaxed text-ink-dim">
+      <p className="font-sans text-2xs leading-relaxed text-ink-subtle">
         Tiers come from a domain heuristic that knows nothing about the page
         itself. A high-trust domain still publishes wrong things.
       </p>
@@ -382,7 +382,7 @@ const TIER_TONE: Record<string, string> = {
   high: "text-add",
   medium: "text-ink-faint",
   low: "text-warn",
-  unknown: "text-ink-dim",
+  unknown: "text-ink-subtle",
 };
 
 const TIER_MARK: Record<string, string> = {

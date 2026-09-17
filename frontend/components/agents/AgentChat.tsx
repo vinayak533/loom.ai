@@ -9,7 +9,9 @@ import type { BranchGroup } from "@/lib/events";
 import { formatCredits } from "@/lib/agents";
 import type { AgentState, ChatItem } from "@/lib/useAgentSocket";
 import { cn } from "@/lib/cn";
+import { Sparkline } from "../Sparkline";
 import { useFeedback } from "@/lib/useFeedback";
+import { makeThumbnail } from "@/lib/thumbnail";
 import { SPRING, SPRING_SNAP, useMotionOK } from "../Anim";
 import { Markdown } from "../Markdown";
 import { ModelSelector } from "../ModelSelector";
@@ -138,22 +140,42 @@ export function AgentChat({
     setSources([]);
   }, [agent.id]);
 
+  /**
+   * Attach files to the turn.
+   *
+   * The thumbnail is drawn from the file in this browser — same
+   * `lib/thumbnail` the Chat and Code composers use, so a PDF here gets its
+   * first page and an image gets itself, rather than the type glyph that was
+   * all this composer could show. It is started *before* the upload is awaited
+   * so the two overlap, and applied to the chip once the chip exists: a
+   * preview is decoration, and making the attachment wait on a canvas would
+   * hold up the thing the user is actually attaching. When it comes back null
+   * — an encrypted PDF, an oversized image — the chip keeps its glyph.
+   */
   const ingest = async (files: FileList | null) => {
     if (!files?.length) return;
     setUploading(true);
     for (const file of Array.from(files)) {
+      const thumbnail = makeThumbnail(file);
       try {
         const up = await uploadFile(sessionId, file, token);
+        const id = `pdf:${up.id}`;
         setSources((prev) => [
           ...prev,
           {
             kind: "pdf",
-            id: `pdf:${up.id}`,
+            id,
             title: up.filename,
             fileId: up.id,
             chars: up.file_type === "application/pdf" ? up.size : undefined,
           },
         ]);
+        void thumbnail.then((data) => {
+          if (!data) return;
+          setSources((prev) =>
+            prev.map((s) => (s.id === id ? { ...s, thumbnail: data } : s)),
+          );
+        });
       } catch (err) {
         setSources((prev) => [
           ...prev,
@@ -315,7 +337,11 @@ export function AgentChat({
         <div className="flex shrink-0 items-center gap-2">
           {credits?.enabled && (
             <span
-              title={`${credits.balance.toFixed(2)} credits left · ${credits.spentThisTurn.toFixed(2)} spent this turn`}
+              data-tip={`${credits.balance.toFixed(2)} credits left · ${credits.spentThisTurn.toFixed(2)} spent this turn${
+                state.creditHistory.length > 1
+                  ? ` · burn over the last ${state.creditHistory.length} turns`
+                  : ""
+              }`}
               className="hidden items-center gap-1.5 rounded-ctl border border-line bg-elevated
                          px-2.5 py-1 sm:flex"
             >
@@ -324,9 +350,18 @@ export function AgentChat({
                 {formatCredits(credits.balance)}
               </span>
               {credits.spentThisTurn > 0 && (
-                <span className="font-mono text-2xs tabular-nums text-ink-dim">
+                <span className="font-mono text-2xs tabular-nums text-ink-subtle">
                   −{formatCredits(credits.spentThisTurn)}
                 </span>
+              )}
+              {state.creditHistory.length > 1 && (
+                <Sparkline
+                  values={state.creditHistory}
+                  width={48}
+                  height={14}
+                  className="ml-1"
+                  label="Credits spent per turn"
+                />
               )}
             </span>
           )}
@@ -409,7 +444,7 @@ export function AgentChat({
                   <div className="min-w-0">
                     <p className="voice-machine text-ink-muted">
                       {tool.name}
-                      <span className="ml-2 text-ink-dim">reasoning, not a function</span>
+                      <span className="ml-2 text-ink-subtle">reasoning, not a function</span>
                     </p>
                     <p className="font-sans text-2xs leading-relaxed text-ink-faint">
                       {tool.note}
@@ -509,7 +544,7 @@ export function AgentChat({
                     type="button"
                     onClick={() => setDraft(s)}
                     className="flex h-9 items-center rounded-ctl border border-line bg-elevated px-3.5
-                               font-sans text-[0.8125rem] text-ink-muted transition-all duration-200
+                               font-sans text-[0.8125rem] text-ink-muted transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200
                                hover:border-accent-line hover:bg-raised hover:text-ink active:scale-[0.98]"
                   >
                     {s}
@@ -625,10 +660,10 @@ export function AgentChat({
                   disabled={!armed || !state.connected}
                   aria-label="Send message"
                   className={cn(
-                    "ml-2 grid h-[34px] w-[34px] place-items-center rounded-ctl transition-all duration-200",
+                    "ml-2 grid h-[34px] w-[34px] place-items-center rounded-ctl transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
                     armed && state.connected
                       ? "bg-gradient-to-br from-accent to-accent-alt text-accent-ink hover:brightness-110 active:scale-[0.92]"
-                      : "cursor-not-allowed bg-raised text-ink-dim opacity-55",
+                      : "cursor-not-allowed bg-raised text-ink-subtle opacity-55",
                   )}
                 >
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">

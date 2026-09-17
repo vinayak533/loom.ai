@@ -1,0 +1,14 @@
+# Development-only tools. Installed on top of requirements.txt, never instead
+# of it, and never into a user-facing sandbox:
+#
+#   python -m venv .venv
+#   .venv/Scripts/pip install -r requirements.txt -r requirements-dev.txt
+#
+# Everything here is pinned to an exact version. The point of a separate file
+# is that adding a tool for the people working on this repository — a linter,
+# a test runner — must not change what the running service or the E2B
+# sandbox image contains. CI installs this file and only this file for its
+# lint job (see .github/workflows/lint.yml); the sandbox gets its own copy of
+# ruff through backend/sandbox/e2b.Dockerfile, pinned to the same version so
+# an agent lints against the rules this repository is checked with.
+ruff==0.16.6

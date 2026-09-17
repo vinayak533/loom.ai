@@ -67,10 +67,19 @@ export function StatusIndicator({
   status,
   iterations,
   usage,
+  showCost = true,
 }: {
   status: AgentStatus;
   iterations: number;
   usage: { input: number; output: number; cost: number };
+  /**
+   * Whether the estimated dollar cost sits beside the token counts.
+   *
+   * False in the Code section, which reports tokens and nothing else — see
+   * the note on `ProjectPulse`'s usage block. The value is still on `usage`
+   * either way; this only decides whether it is drawn.
+   */
+  showCost?: boolean;
 }) {
   const motionOK = useMotionOK();
 
@@ -107,10 +116,14 @@ export function StatusIndicator({
       {usage.output > 0 && (
         <span
           className="chip hidden md:inline-flex"
-          title="Tokens this session (input / output) and estimated cost"
+          data-tip={
+            showCost
+              ? "Tokens this session (input / output) and estimated cost"
+              : "Tokens this session (input / output)"
+          }
         >
-          {usage.input.toLocaleString()}↓ {usage.output.toLocaleString()}↑ · $
-          {usage.cost.toFixed(3)}
+          {usage.input.toLocaleString()}↓ {usage.output.toLocaleString()}↑
+          {showCost && <> · ${usage.cost.toFixed(3)}</>}
         </span>
       )}
     </div>

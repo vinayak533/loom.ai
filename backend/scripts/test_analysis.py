@@ -97,7 +97,7 @@ check(
 )
 
 section("2. Languages ranked by lines, not by file count")
-langs = {l["name"]: l for l in parsed["languages"]}
+langs = {lang["name"]: lang for lang in parsed["languages"]}
 check("Python found", "Python" in langs)
 check("TypeScript found", "TypeScript" in langs)
 check(
@@ -112,8 +112,8 @@ check(
 )
 check(
     "ranked by lines descending",
-    [l["name"] for l in parsed["languages"]][:2] == ["Python", "TypeScript"],
-    " > ".join(f"{l['name']}:{l['lines']}" for l in parsed["languages"][:3]),
+    [lang["name"] for lang in parsed["languages"]][:2] == ["Python", "TypeScript"],
+    " > ".join(f"{lang['name']}:{lang['lines']}" for lang in parsed["languages"][:3]),
 )
 check(
     ".tsx and .ts collapse into one language",

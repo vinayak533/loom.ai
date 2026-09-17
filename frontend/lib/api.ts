@@ -19,13 +19,30 @@ export const HTTP_BASE = WS_BASE.replace(/^ws/, "http").replace(/\/$/, "");
  */
 export function socketUrl(
   sessionId: string,
-  token?: string | null,
+  _token?: string | null,
   section: "chat" | "code" = "chat",
 ): string {
   const base = WS_BASE.replace(/\/$/, "");
   const params = new URLSearchParams({ section });
-  if (token) params.set("token", token);
+  // The token no longer rides in the URL; see `socketProtocols`.
   return `${base}/ws/${encodeURIComponent(sessionId)}?${params.toString()}`;
+}
+
+/**
+ * How the access token reaches a websocket.
+ *
+ * A browser cannot set headers on a websocket handshake, and a token in the
+ * query string is written into every access log between here and the server.
+ * The one header a browser *will* send is the subprotocol list, so the token
+ * travels as `Sec-WebSocket-Protocol: loom.bearer, <token>` and the server
+ * selects `loom.bearer` back. A JWT is made of subprotocol-safe characters.
+ * With no token there is no subprotocol, which is what an anonymous local
+ * deployment expects.
+ */
+export const BEARER_SUBPROTOCOL = "loom.bearer";
+
+export function socketProtocols(token?: string | null): string[] | undefined {
+  return token ? [BEARER_SUBPROTOCOL, token] : undefined;
 }
 
 function authHeaders(token?: string | null): HeadersInit {
@@ -54,6 +71,15 @@ export type SessionRow = {
   pinned_at?: string | null;
   /** Which project this conversation is filed under, or null for unfiled. */
   project_id?: string | null;
+  /**
+   * Which surface the session belongs to. Only ever read by a caller that
+   * asked across surfaces — a section's own list is already scoped, so there
+   * the answer is a foregone conclusion. Null on pre-migration rows, which
+   * Chat shows; see `backend/scripts/audit_session_sections.py`.
+   */
+  section?: "chat" | "code" | null;
+  /** Set on an Agents session, naming the specialist. Null on Chat and Code. */
+  agent_id?: string | null;
 };
 
 /**
@@ -149,6 +175,12 @@ export type BackendConfig = {
    * post-sign-out screen offers a way back in without an account.
    */
   require_auth: boolean;
+  /**
+   * Whether a `git push` from a sandbox can authenticate — the server holds
+   * a `GIT_PUSH_TOKEN`. The History panel says so before someone sets a
+   * remote and wonders why nothing arrives.
+   */
+  git_push?: boolean;
   max_iterations: number;
   models: ModelOption[];
 };
@@ -406,6 +438,10 @@ export type GitSnapshot = {
   branch: string | null;
   status: GitChange[];
   log: GitCommit[];
+  /** URL of `origin`, or null. Absent from older servers; treated as null. */
+  remote?: string | null;
+  /** The end-of-turn commit-and-push opt-in. Absent from older servers. */
+  auto_push?: boolean;
 };
 
 export async function fetchGitState(
@@ -599,6 +635,56 @@ export async function initRepo(
     await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/git/init`, {
       method: "POST",
       headers: authHeaders(token),
+    }),
+  );
+}
+
+/**
+ * Point `origin` at `url`, or clear it with an empty string. Https only, and
+ * the URL must not carry a token — the credential is the server's.
+ */
+export async function setRemote(
+  sessionId: string,
+  url: string,
+  token?: string | null,
+): Promise<{ remote: string | null; snapshot: GitSnapshot }> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/git/remote`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
+      body: JSON.stringify({ url }),
+    }),
+  );
+}
+
+/**
+ * Push the current branch to `origin`. A push that could not happen for a
+ * reason git is not to blame for — no remote, no commits, no credential —
+ * resolves with `pushed: false` and a `reason`; one git refused rejects.
+ */
+export async function pushRemote(
+  sessionId: string,
+  token?: string | null,
+): Promise<{ pushed: boolean; reason?: string; remote?: string; snapshot: GitSnapshot }> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/git/push`, {
+      method: "POST",
+      headers: authHeaders(token),
+    }),
+  );
+}
+
+/** Turn the end-of-turn commit and push on or off for this repository. */
+export async function setAutoPush(
+  sessionId: string,
+  enabled: boolean,
+  token?: string | null,
+): Promise<{ auto_push: boolean; snapshot: GitSnapshot }> {
+  return json(
+    await fetch(`${HTTP_BASE}/api/sessions/${sessionId}/git/auto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
+      body: JSON.stringify({ enabled }),
     }),
   );
 }
@@ -842,12 +928,16 @@ export async function searchSessions(
   query: string,
   token?: string | null,
   section: "chat" | "code" = "chat",
-  options: { agentId?: string | null; signal?: AbortSignal } = {},
+  options: { agentId?: string | null; all?: boolean; signal?: AbortSignal } = {},
 ): Promise<SessionSearchHit[]> {
   const q = query.trim();
   if (!q) return [];
   const search = new URLSearchParams({ q });
-  if (options.agentId) search.set("agent_id", options.agentId);
+  // `scope=all` rather than "send neither filter": on the server an absent
+  // `agent_id` means `agent_id is null`, which is how a section's search
+  // excludes the specialists. Searching everywhere has to say so.
+  if (options.all) search.set("scope", "all");
+  else if (options.agentId) search.set("agent_id", options.agentId);
   else search.set("section", section);
   return json(
     await fetch(`${HTTP_BASE}/api/sessions/search?${search}`, {

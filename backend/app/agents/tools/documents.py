@@ -7,12 +7,12 @@
     chunk_document   REAL. Reuses `app.learn.chunking.chunk`, the same
                      paragraph-boundary splitter the notebook retrieval index
                      uses, so a chunk here reads the way a chunk there does.
-    count_tokens     REAL. tiktoken over the vocabulary each provider bills
-                     against, with a
-                     documented character heuristic as the last resort. The
-                     tokenizer is chosen from the *active* model, which is the
-                     whole point — a count against the wrong vocabulary is a
-                     worse answer than an honest estimate.
+    count_tokens     REAL. tiktoken, with a documented character heuristic as
+                     the last resort. Exact only where tiktoken actually ships
+                     the running model's vocabulary; for every other family it
+                     counts with cl100k_base and says in the result that the
+                     number is an approximation. A count labelled as matched
+                     when it was not is worse than an honest estimate.
 """
 
 from __future__ import annotations
@@ -22,9 +22,7 @@ import logging
 from typing import Any
 
 from app.agents.tools.base import ToolContext, ToolResult, as_json
-from app.config import get_settings
 from app.learn.chunking import chunk as chunk_text, normalise
-from app.llm_router import MODEL_REGISTRY
 
 log = logging.getLogger(__name__)
 
@@ -202,21 +200,48 @@ def _clamp(raw: Any, low: int, high: int, default: int) -> int:
 # count_tokens
 # ---------------------------------------------------------------------------
 
-#: Which tiktoken vocabulary matches which provider. These are the encodings
-#: the OpenAI-compatible gateways actually bill against; a model served through
-#: OpenRouter or OpenCode is not guaranteed to use either, which is why the
-#: result always names the tokenizer it used rather than presenting the number
-#: as authoritative.
-_ENCODING_FOR_PROVIDER = {
-    "openrouter": "cl100k_base",
-    "opencode": "cl100k_base",
-    "groq": "cl100k_base",
+#: Model family -> tiktoken vocabulary, for the families where tiktoken really
+#: has the matching one. Matched as a prefix on the model id.
+#:
+#: This used to be keyed on *provider*, and every provider in the registry
+#: mapped to `cl100k_base` — as did the fallback. So the tool returned
+#: `cl100k_base` for every model in the roster while its description promised a
+#: tokenizer matched to the running model. The number was fine as an estimate
+#: and the claim around it was not.
+#:
+#: The list is short because it is honest. tiktoken ships OpenAI's vocabularies;
+#: Llama, Qwen, DeepSeek, MiniMax and Nemotron each use their own SentencePiece
+#: or BPE vocabulary that is not among them, and mapping them to a cl100k they
+#: do not use would be the same false claim with more entries.
+_ENCODING_FOR_FAMILY: dict[str, str] = {
+    # OpenAI's open-weight models ship with the harmony vocabulary.
+    "gpt-oss": "o200k_harmony",
 }
 
-#: The fallback. Four characters per token is the long-standing rule of thumb
-#: for English prose and is wrong by roughly ±15% — stated in the output so the
-#: number is never mistaken for a measurement.
+#: Used for every model with no exact vocabulary of its own. It is a real BPE
+#: tokenizer over English, so it is a much better estimate than counting
+#: characters — but it is an estimate, and `_describe` says so in the result.
+_DEFAULT_ENCODING = "cl100k_base"
+
+#: The last resort, when tiktoken itself is unavailable. Four characters per
+#: token is the long-standing rule of thumb for English prose and is wrong by
+#: roughly ±15% — stated in the output so the number is never mistaken for a
+#: measurement.
 _CHARS_PER_TOKEN = 4.0
+
+
+def _encoding_for(model_id: str) -> tuple[str, bool]:
+    """The vocabulary to count ``model_id`` with, and whether it is really its.
+
+    The boolean is the whole point of returning a tuple: it is what stops the
+    result claiming a model-matched count when what it did was approximate one
+    family's tokens with another family's vocabulary.
+    """
+    key = (model_id or "").strip().lower()
+    for family, encoding in _ENCODING_FOR_FAMILY.items():
+        if key.startswith(family):
+            return encoding, True
+    return _DEFAULT_ENCODING, False
 
 
 async def count_tokens(ctx: ToolContext, args: dict) -> ToolResult:
@@ -225,18 +250,24 @@ async def count_tokens(ctx: ToolContext, args: dict) -> ToolResult:
         return ToolResult("Error: `text` was empty.", success=False)
 
     model_id = (args.get("model_id") or ctx.model_id or "").strip()
-    meta = MODEL_REGISTRY.get(model_id)
-    provider = (meta or {}).get("provider", "")
+    encoding_name, exact = _encoding_for(model_id)
 
-    count, method = await asyncio.to_thread(
-        _tiktoken_count, text, _ENCODING_FOR_PROVIDER.get(provider, "cl100k_base")
-    )
+    count, method = await asyncio.to_thread(_tiktoken_count, text, encoding_name)
 
     if count is None:
+        exact = False
         count = int(len(text) / _CHARS_PER_TOKEN)
         method = (
             f"character heuristic ({_CHARS_PER_TOKEN:g} chars/token, ±15% — an "
             "estimate, not a measurement)"
+        )
+    elif not exact:
+        # Say it here, once, rather than leaving the caller to infer it from a
+        # vocabulary name it has no reason to recognise.
+        method = (
+            f"{method} — an approximation. {model_id or 'This model'} uses its "
+            "own vocabulary, which tiktoken does not ship; expect the real "
+            "count to differ by roughly 10-20%."
         )
 
     payload = {
@@ -245,9 +276,17 @@ async def count_tokens(ctx: ToolContext, args: dict) -> ToolResult:
         "words": len(text.split()),
         "model_id": model_id or "(unknown)",
         "tokenizer": method,
+        # A machine-readable version of the same fact, so a caller can branch
+        # on it without parsing the sentence above.
+        "exact_for_model": exact,
     }
+    headline = (
+        f"{count:,} tokens for {len(text):,} characters."
+        if exact
+        else f"~{count:,} tokens for {len(text):,} characters (approximate)."
+    )
     return ToolResult(
-        output=f"{count:,} tokens for {len(text):,} characters.\n\n{as_json(payload)}",
+        output=f"{headline}\n\n{as_json(payload)}",
         meta=payload,
     )
 
@@ -324,12 +363,15 @@ SCHEMAS: dict[str, dict] = {
     "count_tokens": {
         "name": "count_tokens",
         "description": (
-            "Count the tokens in some text using the tokenizer that matches the "
-            "model currently running this turn. Call it on any source before "
-            "summarising it — the count is what goes in your metadata block, "
-            "and it tells you whether the material fits in one pass. The result "
-            "names the tokenizer it used, including when it had to fall back to "
-            "a character estimate; report that honestly."
+            "Count the tokens in some text with a real BPE tokenizer. Call it "
+            "on any source before summarising it — the count is what goes in "
+            "your metadata block, and it tells you whether the material fits "
+            "in one pass. It is an approximate count unless the result says "
+            "otherwise: tiktoken ships OpenAI's vocabularies, so for any other "
+            "model family the number is a close estimate rather than that "
+            "model's own count. The result names the tokenizer it used and "
+            "sets `exact_for_model`; report whichever it says, and never "
+            "describe an approximate count as the model's exact one."
         ),
         "input_schema": {
             "type": "object",

@@ -238,7 +238,7 @@ async def test_edit_branches() -> None:
         labels = [v["label"] for v in entry["versions"]]
         check(
             "version 1 still carries the original wording",
-            any("primary colour" in (l or "") for l in labels),
+            any("primary colour" in (label or "") for label in labels),
             f"labels={labels}",
         )
 

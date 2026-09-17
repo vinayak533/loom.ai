@@ -274,12 +274,12 @@ function Toolbar({
   const zoomed = live && scale < 0.995;
 
   return (
-    <header className="flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2.5">
+    <header className="flex h-bar-sub shrink-0 items-center gap-1.5 border-b border-line px-3">
       <StatusDot status={preview.status} erroring={Boolean(preview.error)} />
 
       <span
         className="voice-machine min-w-0 flex-1 truncate text-ink-faint"
-        title={preview.url ?? preview.command}
+        data-tip={preview.url ?? preview.command}
       >
         {live ? prettyUrl(preview.url!) : preview.command || "no server"}
       </span>
@@ -288,8 +288,8 @@ function Toolbar({
           a styling bug rather than as a smaller viewport. */}
       {zoomed && (
         <span
-          className="voice-machine shrink-0 text-2xs text-ink-dim"
-          title={`Rendering at ${VIEWPORTS[viewport].label}, scaled to fit the panel`}
+          className="voice-machine shrink-0 text-2xs text-ink-subtle"
+          data-tip={`Rendering at ${VIEWPORTS[viewport].label}, scaled to fit the panel`}
         >
           {Math.round(scale * 100)}%
         </span>
@@ -377,7 +377,7 @@ function ViewportToggle({
             type="button"
             onClick={() => onChange(key)}
             aria-pressed={on}
-            title={`${key} — ${VIEWPORTS[key].label}`}
+            data-tip={`${key} — ${VIEWPORTS[key].label}`}
             className={cn(
               "relative grid h-6 w-6 place-items-center rounded-[calc(var(--r-ctl)-2px)]",
               "transition-colors duration-200",
@@ -460,7 +460,7 @@ function IconButton({
         href={href}
         target="_blank"
         rel="noreferrer noopener"
-        title={label}
+        data-tip={label}
         aria-label={label}
         className={className}
       >
@@ -469,7 +469,7 @@ function IconButton({
     );
   }
   return (
-    <button type="button" onClick={onClick} title={label} aria-label={label} className={className}>
+    <button type="button" onClick={onClick} data-tip={label} aria-label={label} className={className}>
       {body}
     </button>
   );

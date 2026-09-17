@@ -4,6 +4,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FileNode } from "@/lib/events";
 import { cn, shortPath } from "@/lib/cn";
+import { useFocusTrap } from "@/lib/useFocusTrap";
+import { PALETTE_USED_KEY } from "./EmptyState";
 import { SPRING_SNAP, useMotionOK } from "./Anim";
 
 /**
@@ -27,6 +29,13 @@ export type Command = {
   group: string;
   /** Right-aligned secondary text — the shortcut, or the model it switches to. */
   hint?: string;
+  /**
+   * A quiet second line. Only history hits use it, and only the ones that
+   * matched inside a transcript: without the matched line, a row whose title
+   * has nothing to do with what was typed is baffling. A title match already
+   * shows what matched on the first line — same rule as the sidebar's results.
+   */
+  detail?: string;
   /** Extra words that should match, e.g. "sandbox" for the terminal toggle. */
   keywords?: string;
   /** Disabled commands stay listed: absence is harder to explain than greying. */
@@ -41,6 +50,8 @@ export function CommandPalette({
   files,
   treeRoot,
   onSelectFile,
+  remote = [],
+  onQueryChange,
 }: {
   open: boolean;
   onClose: () => void;
@@ -49,19 +60,41 @@ export function CommandPalette({
   files: FileNode[];
   treeRoot: string;
   onSelectFile: (path: string) => void;
+  /**
+   * Results the palette cannot work out for itself — conversations, which
+   * live on the server. Already ordered by whoever fetched them and appended
+   * in that order rather than re-scored here: the local matcher scores a
+   * *label*, and half of these matched on a line buried in a transcript that
+   * the label does not contain. Re-ranking them would move the best hit down.
+   */
+  remote?: Command[];
+  /** Fires as the query changes, so the owner can fetch `remote` for it. */
+  onQueryChange?: (query: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  // The palette focuses its own input; the trap keeps Tab inside and returns
+  // focus to whatever opened it.
+  useFocusTrap(dialog, open, { autoFocus: false });
   const motionOK = useMotionOK();
 
   const filePaths = useMemo(() => flatten(files), [files]);
 
   const results = useMemo(
-    () => rank(query, commands, filePaths, treeRoot, onSelectFile),
-    [query, commands, filePaths, treeRoot, onSelectFile],
+    () => rank(query, commands, filePaths, treeRoot, onSelectFile, remote),
+    [query, commands, filePaths, treeRoot, onSelectFile, remote],
   );
+
+  // The owner fetches on this and does its own debouncing. A closed palette
+  // reports an empty query rather than its last one: the reset otherwise waits
+  // until the next open, leaving a search — and the hits it returns — alive in
+  // the parent for a surface nobody is looking at.
+  useEffect(() => {
+    onQueryChange?.(open ? query : "");
+  }, [open, query, onQueryChange]);
 
   // A fresh open is a fresh search. Resetting on close instead would show the
   // last query for one frame as the palette animates away.
@@ -72,6 +105,11 @@ export function CommandPalette({
     // The palette mounts inside an AnimatePresence subtree, so the input does
     // not exist until after this effect's first tick.
     const timer = setTimeout(() => input.current?.focus(), 20);
+    try {
+      localStorage.setItem(PALETTE_USED_KEY, "1");
+    } catch {
+      /* storage unavailable */
+    }
     return () => clearTimeout(timer);
   }, [open]);
 
@@ -128,6 +166,7 @@ export function CommandPalette({
           />
           <motion.div
             key="palette"
+            ref={dialog}
             role="dialog"
             aria-modal="true"
             aria-label="Command palette"
@@ -228,7 +267,7 @@ function Row({
         className={cn(
           "flex w-full items-center gap-3 rounded-ctl px-2.5 py-2 text-left transition-colors duration-150",
           item.disabled
-            ? "cursor-not-allowed text-ink-dim"
+            ? "cursor-not-allowed text-ink-subtle"
             : active
               ? "bg-raised text-ink"
               : "text-ink-muted",
@@ -241,15 +280,22 @@ function Row({
             active && !item.disabled ? "bg-accent" : "bg-ink-dim",
           )}
         />
-        <span
-          className={cn(
-            "min-w-0 flex-1 truncate",
-            item.group === "Files"
-              ? "voice-machine"
-              : "font-sans text-[0.8125rem]",
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span
+            className={cn(
+              "truncate",
+              item.group === "Files"
+                ? "voice-machine"
+                : "font-sans text-[0.8125rem]",
+            )}
+          >
+            {item.label}
+          </span>
+          {item.detail && (
+            <span className="truncate font-sans text-[11px] leading-snug text-ink-faint">
+              {item.detail}
+            </span>
           )}
-        >
-          {item.label}
         </span>
         {item.hint && (
           <span className="voice-machine shrink-0 text-2xs text-ink-faint">
@@ -319,6 +365,7 @@ function rank(
   filePaths: string[],
   treeRoot: string,
   onSelectFile: (path: string) => void,
+  remote: Command[] = [],
 ): Command[] {
   const q = query.trim();
 
@@ -361,7 +408,16 @@ function rank(
   // interleave groups — and since a heading is drawn whenever the group
   // changes, "Preview / Project / Session / Preview / Project" is what the
   // user would actually read.
-  const all = [...scored, ...fileHits];
+  // Server hits keep the order they arrived in, and always sit below both
+  // local groups — hence scores under 1, which is the floor `score()` returns
+  // for anything that matched at all. A command or a file is a thing the user
+  // named; a conversation matched a phrase somewhere inside it, and when that
+  // is what they meant it is usually the only group with anything in it. The
+  // descending fraction exists to carry the server's order through the sort
+  // below, not to be compared against a local score.
+  const remoteHits = remote.map((item, i) => ({ item, score: 0.9 - i * 0.001 }));
+
+  const all = [...scored, ...fileHits, ...remoteHits];
   const best = new Map<string, number>();
   for (const r of all) {
     best.set(r.item.group, Math.max(best.get(r.item.group) ?? 0, r.score));

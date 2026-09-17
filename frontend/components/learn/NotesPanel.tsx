@@ -40,7 +40,7 @@ export function NotesPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3.5">
+      <header className="flex h-bar-sub shrink-0 items-center gap-2 border-b border-line px-3.5">
         <span className="sigil h-1.5 w-1.5 bg-accent-alt" aria-hidden />
         <h2 className="voice-label text-ink-muted">Notes</h2>
         <span className="voice-machine ml-auto text-ink-faint">{notes.length}</span>
@@ -79,7 +79,7 @@ export function NotesPanel({
                   onClick={submit}
                   disabled={!draft.trim()}
                   className="h-8 flex-1 rounded-ctl bg-accent text-2xs font-semibold text-accent-ink
-                             transition-all duration-200 hover:brightness-110 active:scale-[0.98]
+                             transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:brightness-110 active:scale-[0.98]
                              disabled:opacity-40"
                 >
                   Save note
@@ -107,7 +107,7 @@ export function NotesPanel({
               transition={motionOK ? { duration: 0.14 } : { duration: 0 }}
               onClick={() => setComposing(true)}
               className="flex h-9 w-full items-center justify-center gap-2 rounded-ctl border border-line
-                         bg-elevated text-2xs font-medium text-ink transition-all duration-200
+                         bg-elevated text-2xs font-medium text-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200
                          hover:border-accent-line hover:bg-raised active:scale-[0.985]"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-accent" aria-hidden>
@@ -174,7 +174,7 @@ function NoteCard({
       <div className="mb-1.5 flex items-center gap-1.5">
         <span
           className={cn(
-            "rounded px-1.5 py-0.5 font-mono text-[0.5625rem] uppercase tracking-wider",
+            "rounded px-1.5 py-0.5 font-mono text-2xs uppercase tracking-wider",
             ai ? "bg-accent-soft text-accent" : "bg-raised text-ink-faint",
           )}
         >
@@ -209,7 +209,7 @@ function NoteCard({
                 setEditing(false);
               }}
               className="h-7 flex-1 rounded-ctl bg-accent text-2xs font-semibold text-accent-ink
-                         transition-all duration-200 hover:brightness-110"
+                         transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:brightness-110"
             >
               Save
             </button>
@@ -281,7 +281,7 @@ function NoteAction({
     <button
       type="button"
       aria-label={label}
-      title={label}
+      data-tip={label}
       onClick={onClick}
       className={cn(
         "grid h-6 w-6 place-items-center rounded transition-colors duration-150",

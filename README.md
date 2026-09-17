@@ -163,6 +163,39 @@ remain as accelerators. The agent may write the same file while a buffer is
 dirty; that is handled where it happens — the agent's version is adopted into a
 *clean* buffer only, and a dirty one is left alone and says so.
 
+### The terminal takes commands
+
+The panel at the foot of the context column was output-only: it rendered
+`tool_output_chunk` frames and had nowhere to type. The socket agreed —
+anything that was not `user_message`, `cancel`, `set_model`, `edit_message`,
+`regenerate`, `switch_branch` or `ping` came back as
+`Unknown client frame`, which `scripts/test_terminal.py` records as the repro.
+
+It is a shell now. A `terminal_command` frame runs in **the same sandbox the
+agent's tools use, through the same `sandbox_manager.get`** — so the same lazy
+creation, the same keepalive, the same idle reaper, and the same path
+confinement. Nothing here is a second lifecycle, which is the whole reason it
+routes through `tools/impl.py` rather than opening its own connection.
+
+Three differences from an agent command, all deliberate:
+
+* **It is not a tool call.** Output streams as `tool_output_chunk` on a
+  `term_…` call id, bracketed by `terminal_started` / `terminal_exit` rather
+  than `tool_call_start` / `tool_call_result`. A command the user typed must
+  not appear in the transcript as something the agent did.
+* **It gets longer than 30 seconds.** `TERMINAL_TIMEOUT_SECONDS` defaults to
+  120. The agent is told to background anything slow and split its work up; a
+  person typing `npm install` expects to wait for it.
+* **One at a time, per socket.** A second command while one is running is
+  refused with an error rather than queued — the panel is a single terminal,
+  and two commands interleaving their output in it would be unreadable. It is
+  *not* gated on the agent: running `ls` while a turn is in flight is the
+  normal case, and the sandbox handles both.
+
+Up and down walk the commands typed this session. The prompt locks while a
+command runs and unlocks on `terminal_exit`, including the timeout and
+sandbox-unavailable paths — which is why those emit one.
+
 ### Opening a folder — the composer's `+`
 
 One entry point for everything you can add to a session, in the order people
@@ -646,6 +679,8 @@ cp .env.example .env
 | `OPENROUTER_API_KEY` | no | 2 selectable models |
 | `GROQ_API_KEY` | no | 1 selectable model (GPT-OSS 120B); also names sessions when present |
 | `SUPABASE_*` | no | persistence, auth, uploads — the app degrades to in-memory |
+| `GIT_PUSH_TOKEN` | no | lets a sandbox `git push`. Without it commits still happen and pushes report the missing credential |
+| `E2B_TEMPLATE` | no | the sandbox image built from `backend/sandbox/`. Unset, E2B's base image is used and tools that need more say so |
 
 Run it:
 
@@ -656,6 +691,30 @@ cd backend
 
 `GET /api/config` reports which integrations are wired up (booleans only, never
 key values).
+
+#### Dependencies, and where each one is allowed to live
+
+Three files, and the split is the point — a tool added for one of them must not
+silently change the other two:
+
+| File | For | Installed by |
+|---|---|---|
+| `backend/requirements.txt` | what the service imports at runtime | the deploy, the venv |
+| `backend/requirements-dev.txt` | tools for people working on this repo (ruff, pinned) | a developer, and CI's lint job |
+| `backend/sandbox/e2b.Dockerfile` | what a **user's sandbox** contains | `e2b template build`, once |
+
+`ruff` used to be in `requirements.txt`, and `lint_code` used to `pip install`
+it into a live sandbox the first time it was asked to lint Python. Both are
+gone. A runtime install changes what a session can do depending on which tool
+happened to run first, cannot be reproduced from the repository, and does
+nothing at all in a sandbox with no network — so the linter is baked into the
+image at the same pinned version this repository is checked with, and
+`SANDBOX_RUNTIME_LINTER_INSTALL=1` is the documented escape hatch for a
+deployment that cannot build a template. With neither, the tool reports a
+syntax-only check as degraded, which is the honest answer.
+
+Building the image is four commands and is written down in
+`backend/sandbox/README.md`.
 
 ### Model selection: manual, or Auto
 
@@ -1005,9 +1064,44 @@ an explicit regenerate.
 
 ## Version control
 
-Still sandbox-only. There is no remote, no credential, and no network path out
-of `tools/git.py` — the module's opening note is unchanged and is a guarantee,
-not a description of what has been built so far.
+History now leaves the sandbox — deliberately, on request, and never with a
+credential inside it.
+
+A repository can be given **one remote**, `origin`, and it must be an `https://`
+URL with no userinfo in it. `git.validate_remote_url` refuses
+`https://user:token@host/...` before git ever sees it, because that is the one
+shape that ends up written into `.git/config` in plain text where the sandbox
+can read it back.
+
+**The token is the server's and reaches exactly one process.** `GIT_PUSH_TOKEN`
+lives in `backend/.env`, is handed to a single `git push` through that
+command's environment plus a credential helper written inline on the command
+line, and is never stored in the repository, the sandbox image, or any file in
+the sandbox. `scripts/test_git_push.py` asserts that: it greps `.git/config`
+after a real push and fails if anything token-shaped is there.
+
+**Pushing at the end of a turn is opt-in, and off by default.** The Code
+section can mirror Claude Code — finish a turn, commit what changed with a
+generated message, push, and show the commit — but only for a repository whose
+owner has ticked *Commit and push after each turn* in the History panel. The
+reason it is not the default is that a turn is not always a deliverable: "just
+try this" and "build the feature" look identical to the code that would have to
+decide. So the explicit paths (the `git` tool's `commit` and `push`, the
+panel's buttons) stay exactly as they were, and the automatic one is a switch a
+person throws per repository. It is stored in the repository's own config
+(`loom.autopush`), so it goes when the sandbox goes, beside the remote it
+applies to.
+
+When it fires, `app/autocommit.py` runs *before* `agent_done` — the composer
+re-arms on that frame, and a commit landing after it would arrive under a turn
+the user believes is finished. A stopped or failed turn is left uncommitted:
+what it wrote is half of something. The result is a `turn_commit` frame, which
+the transcript renders as a card carrying the short hash, the subject, the
+branch, the file count and whether the push succeeded — and which flashes the
+committed paths in the file tree, so the panel opens to what was just recorded.
+
+A commit that lands but fails to push is **amber, not red**, and says why: the
+work is safe locally and the next successful push carries it.
 
 What the panel does now:
 
@@ -1017,6 +1111,8 @@ What the panel does now:
 | **Branches** | List, create, switch, merge. Merging is the secondary action on a row that is not the current branch, because merging *into* the branch you are looking at is what the word means. |
 | **Discard** | The one operation nothing can undo — an untracked file removed here was never in the object store. It confirms, inline. |
 | **Commit messages** | A cheap model writes one from the staged diff, into the box. Never applied. |
+| **Remote** | One `origin`, https only, validated on the way in. `Push` sends the current branch and sets upstream. |
+| **After each turn** | The opt-in above. Off by default, stored in the repository, shown as a checkbox under the remote. |
 
 Two decisions worth stating.
 
@@ -1031,10 +1127,15 @@ the caller looking at a repository whose state nobody told them about.
 `conflicted` names the files, and both the UI and the agent's tool report it as
 a result with a problem in it rather than as a call that did not happen.
 
-**The commit message is suggested, never applied.** The user still presses
-commit, because that press is the only moment anyone reads what is about to be
-recorded permanently — and a wrong commit message is permanent in a way a wrong
-chat reply is not.
+**The commit message is suggested, never applied** — on the manual path. The
+user still presses commit, because that press is the only moment anyone reads
+what is about to be recorded permanently, and a wrong commit message is
+permanent in a way a wrong chat reply is not. The end-of-turn path is the
+deliberate exception, and it is exactly why that path is opt-in: turning it on
+*is* the press, made once for the repository instead of once per commit. When
+no model is available to write a message, the fallback is factual rather than
+inventive (`Update 3 files`, with the names in the body) — a dull subject beats
+a turn's work left uncommitted, and beats a subject the diff does not support.
 
 ---
 
@@ -1189,6 +1290,60 @@ That must print nothing. Currently the client reads exactly three variables:
 | Upload rate limit | `RATE_LIMIT_UPLOADS_PER_MINUTE` | 10/min per session |
 | Token usage logging | `token_usage` table | every model call |
 | CORS | `ALLOWED_ORIGINS` | explicit allowlist, never `*` |
+| Websocket origin check | `ALLOWED_ORIGINS` | same list; a socket from any other page is closed with 4403 |
+| Per-address ceilings | `app/security.py` | 30 new sessions/min, 60 socket connects/min, 3× the upload limit |
+| Request body ceiling | `app/security.py` | 21 MB, refused from `Content-Length` before the body is read |
+| Response headers | `app/security.py` | `nosniff`, `frame-ancestors 'none'`, `no-store`, HSTS over https |
+
+### The perimeter, beyond auth
+
+`app/security.py` is the layer around authentication and ownership. Three
+of its decisions are worth knowing about before deploying:
+
+* **The access token does not travel in the websocket URL.** A browser cannot
+  set headers on a websocket handshake, and `?token=` lands in every access
+  log between the browser and the process. The client offers the token as a
+  subprotocol (`Sec-WebSocket-Protocol: loom.bearer, <jwt>`) and the server
+  selects `loom.bearer` back. `?token=` is still honoured for older clients.
+* **CORS does not apply to websockets**, so the socket handshake checks its
+  `Origin` against `ALLOWED_ORIGINS` itself. A non-browser client sends no
+  Origin and is allowed through; a browser on a foreign page is not.
+* **The rate limiters are keyed two ways.** The per-session limits above bound
+  a session, and a session id is minted by the client, so on their own they
+  bound nothing a caller could not sidestep with a fresh id. The per-address
+  limits bound the caller. Both honour one hop of `X-Forwarded-For`.
+
+The frontend sends its own headers from `next.config.mjs`: a content-security
+policy derived from `NEXT_PUBLIC_BACKEND_WS_URL` and the Supabase URL,
+`frame-ancestors 'none'`, HSTS, and no `X-Powered-By`. Agent-rendered
+components and artifacts run in sandboxed iframes without `allow-same-origin`;
+the Markdown renderer only links `http`, `https` and `mailto`.
+
+### Smoke test
+
+Before pointing users at a deployment, run the perimeter check against the
+real configuration. It boots the app in-process, never starts a model turn,
+and exits non-zero on the first failure:
+
+```bash
+cd backend && python scripts/smoke_test.py
+```
+
+It covers boot, the response headers, that `/api/config` leaks no key value,
+session creation and its per-address ceiling, the body-size gate, upload
+filename sanitising, the websocket origin check and the bearer subprotocol.
+On the frontend, `npm run build` is the equivalent: it type-checks, lints,
+and runs `scripts/check-classes.mjs`, which fails on any class that reaches
+past the design tokens.
+
+### Interface primitives
+
+The shared components that keep the interface on its own design system live
+in `frontend/components/`: `Tooltip` (and the `data-tip` layer that replaces
+every native `title`), `PanelHeader` with the `--bar-h` / `--bar-h-sub` /
+`--gutter` tokens, `Skeleton`, `Meter`, `Sparkline`, and the action toast
+channel in `Toast.tsx` (`useToast().notify` for outcomes, `useToast().undoable`
+for reversible deletion). Every `aria-modal` dialog runs `useFocusTrap`.
 
 ---
 
@@ -1321,7 +1476,30 @@ frontend/
 * **A stopped turn's token count is an estimate.** The provider reports `usage`
   only on the final frame, which a stopped stream never receives, so the charge
   is derived from the characters actually streamed at four per token. The
-  alternative is billing nothing for output that was really produced.
+  alternative is billing nothing for output that was really produced. Both turn
+  loops estimate the same way, through `app/turnstop.py` — the agents' loop used
+  to bill a hardcoded zero for input, which on a specialist is most of the turn.
+* **`count_tokens` is approximate for most of the roster.** tiktoken ships
+  OpenAI's vocabularies, so the count is exact for `gpt-oss` and an
+  approximation elsewhere — Llama, Qwen, DeepSeek, MiniMax and Nemotron each
+  use a vocabulary it does not have. The result says which it gave you and sets
+  `exact_for_model`; expect 10-20% either way on the approximate path.
+* **`lint_code` needs the project's sandbox template, and says so when it is
+  absent.** E2B's base image has neither ruff nor pyflakes. The linter is
+  installed by `backend/sandbox/e2b.Dockerfile` at build time; with
+  `E2B_TEMPLATE` unset the tool falls back to a syntax-only check and reports
+  it as degraded rather than returning a "clean" it did not earn. Nothing is
+  installed into a running sandbox unless
+  `SANDBOX_RUNTIME_LINTER_INSTALL=1` is set deliberately.
+* **A sandbox push needs `GIT_PUSH_TOKEN` on the server.** There is no way to
+  authenticate from inside the sandbox otherwise, and the token is never put
+  there — so with it unset, `push` reports the missing credential and the
+  end-of-turn auto-commit records the commit with `pushed: false` rather than
+  failing the turn.
+* **The end-of-turn commit is per repository, not per account.** The opt-in
+  lives in the sandbox's git config, so a reaped sandbox takes it with it. That
+  is intentional — it applies to a history that no longer exists — but it does
+  mean re-ticking the box after a long idle gap.
 * **A PDF thumbnail costs a 350 KB download the first time.** Only for a
   vector PDF, only once per session, and only for someone who attaches one —
   the byte scan handles scanned documents with no library at all. A PDF that

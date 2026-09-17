@@ -211,7 +211,7 @@ export function CodeIntro({
             transition={
               motionOK ? { duration: 0.4, delay: 1.9 } : { duration: 0.18 }
             }
-            className="absolute bottom-10 select-none font-sans text-2xs text-ink-dim"
+            className="absolute bottom-10 select-none font-sans text-2xs text-ink-subtle"
           >
             Press any key to skip
           </motion.span>

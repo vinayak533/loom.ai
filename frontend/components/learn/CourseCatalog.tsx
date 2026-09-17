@@ -2,6 +2,8 @@
 
 import { memo, useMemo, useState } from "react";
 import { cn } from "@/lib/cn";
+import { Meter } from "../Meter";
+import { SkeletonCard } from "../Skeleton";
 import {
   courseHues,
   duration,
@@ -68,6 +70,22 @@ export function CourseCatalog({
     });
   }, [courses, query, filter]);
 
+  /**
+   * Opened is not started. A course whose `started` flag is true but whose
+   * `completed_count` is zero has been looked at and nothing more, and
+   * reporting it as in progress at 0% made an accurate number look like a bug.
+   */
+  const { inProgressCount, openedNotStartedCount } = useMemo(() => {
+    let progressed = 0;
+    let opened = 0;
+    for (const c of courses) {
+      if (c.progress.completed || !c.progress.started) continue;
+      if (c.progress.completed_count > 0) progressed += 1;
+      else opened += 1;
+    }
+    return { inProgressCount: progressed, openedNotStartedCount: opened };
+  }, [courses]);
+
   const resume = useMemo(() => {
     const active = courses
       .filter((c) => c.progress.started && !c.progress.completed && c.progress.last_accessed)
@@ -95,7 +113,21 @@ export function CourseCatalog({
 
         {stats && stats.chapters_completed + stats.exams_taken > 0 && (
           <div className="mb-6 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-            <Stat label="In progress" value={String(stats.courses_started)} />
+            {/* `courses_started` counts courses that were *opened*, which is
+                not the same thing as courses in progress — a course you looked
+                at once and closed sat in this tile at 0%, which reads as a
+                broken counter rather than as an accurate one. This counts the
+                courses with a finished chapter behind them, and the tile says
+                separately how many are merely open. */}
+            <Stat
+              label="In progress"
+              value={String(inProgressCount)}
+              note={
+                openedNotStartedCount > 0
+                  ? `+${openedNotStartedCount} opened`
+                  : undefined
+              }
+            />
             <Stat label="Chapters done" value={String(stats.chapters_completed)} />
             <Stat label="Assessments" value={String(stats.exams_taken)} />
             <Stat
@@ -165,10 +197,9 @@ export function CourseCatalog({
         ) : loading && courses.length === 0 ? (
           <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[0, 1, 2, 3, 4, 5].map((i) => (
-              <li
-                key={i}
-                className="h-[268px] animate-pulse rounded-card border border-line bg-elevated"
-              />
+              <li key={i}>
+                <SkeletonCard className="h-[268px]" />
+              </li>
             ))}
           </ul>
         ) : visible.length === 0 ? (
@@ -219,7 +250,7 @@ const CourseTile = memo(function CourseTile({
     <li>
       <article
         className="group flex h-full flex-col overflow-hidden rounded-card border border-line
-                   bg-elevated transition-all duration-200 ease-out hover:border-accent-line
+                   bg-elevated transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 ease-out hover:border-accent-line
                    hover:bg-raised hover:shadow-lift"
       >
         {/* The face. Generated from the id, so a new course needs no asset. */}
@@ -299,13 +330,7 @@ const CourseTile = memo(function CourseTile({
               </span>
               <span className="voice-machine text-ink">{percent}%</span>
             </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-inset">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-accent to-accent-alt
-                           transition-[width] duration-300 ease-out"
-                style={{ width: `${percent}%` }}
-              />
-            </div>
+            <Meter value={percent} label="Course progress" />
           </div>
 
           <button
@@ -313,7 +338,7 @@ const CourseTile = memo(function CourseTile({
             onClick={() => onContinue(course.id, course.progress.next_chapter_id)}
             className={cn(
               "mt-4 flex h-9 touch:h-11 w-full items-center justify-center gap-1.5 rounded-ctl text-[0.8125rem]",
-              "font-semibold transition-all duration-200 active:scale-[0.985]",
+              "font-semibold transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 active:scale-[0.985]",
               started
                 ? "bg-gradient-to-br from-accent to-accent-alt text-accent-ink hover:brightness-110"
                 : "border border-line bg-inset text-ink hover:border-accent-line hover:bg-raised",
@@ -337,15 +362,31 @@ function ResumeBanner({
   course: CourseCard;
   onContinue: () => void;
 }) {
+  const untouched = course.progress.completed_count === 0;
   return (
     <div className="mb-6 flex flex-wrap items-center gap-4 rounded-card border border-accent-line
                     bg-accent-soft px-4 py-3.5">
       <div className="min-w-0 flex-1">
-        <p className="voice-label text-accent">Pick up where you left off</p>
+        {/* Two different states wear the same banner, and saying "pick up where
+            you left off · 0/12 chapters · 0%" to someone who opened a course
+            and read nothing describes a bug rather than their progress. */}
+        <p className="voice-label text-accent">
+          {untouched ? "Ready when you are" : "Pick up where you left off"}
+        </p>
         <p className="mt-1 truncate text-[0.9375rem] font-medium text-ink">{course.title}</p>
         <p className="voice-machine mt-0.5 text-ink-faint">
-          {course.progress.completed_count}/{course.progress.chapter_count} chapters ·{" "}
-          {course.progress.percent}% · {duration(course.progress.minutes_remaining)} left
+          {untouched ? (
+            <>
+              Opened, no chapters finished yet ·{" "}
+              {course.progress.chapter_count} chapters ·{" "}
+              {duration(course.progress.minutes_remaining)}
+            </>
+          ) : (
+            <>
+              {course.progress.completed_count}/{course.progress.chapter_count} chapters ·{" "}
+              {course.progress.percent}% · {duration(course.progress.minutes_remaining)} left
+            </>
+          )}
         </p>
       </div>
       <button
@@ -353,7 +394,7 @@ function ResumeBanner({
         onClick={onContinue}
         className="flex h-9 touch:h-11 shrink-0 items-center gap-1.5 rounded-ctl bg-gradient-to-br from-accent
                    to-accent-alt px-4 text-[0.8125rem] font-semibold text-accent-ink
-                   transition-all duration-200 hover:brightness-110 active:scale-[0.98]"
+                   transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:brightness-110 active:scale-[0.98]"
       >
         Continue
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -379,11 +420,23 @@ export function DifficultyChip({ difficulty }: { difficulty: Difficulty }) {
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({
+  label,
+  value,
+  note,
+}: {
+  label: string;
+  value: string;
+  /** A qualifier the number alone would misrepresent. Rendered beside it. */
+  note?: string;
+}) {
   return (
     <div className="rounded-card border border-line bg-elevated px-3.5 py-2.5">
       <p className="voice-label text-ink-faint">{label}</p>
-      <p className="mt-1 font-mono text-[1.125rem] font-medium tabular-nums text-ink">{value}</p>
+      <p className="mt-1 flex items-baseline gap-1.5 font-mono text-[1.125rem] font-medium tabular-nums text-ink">
+        {value}
+        {note && <span className="text-[0.6875rem] font-normal text-ink-faint">{note}</span>}
+      </p>
     </div>
   );
 }

@@ -3,9 +3,12 @@
 One connection = one session. Two tasks run concurrently:
 
   * a **writer** that drains the session's `Emitter` queue onto the socket;
-  * a **reader** that accepts `user_message` / `cancel` / `ping` frames.
+  * a **reader** that accepts `user_message` / `cancel` / `ping` frames, and
+    — in the Code section — `terminal_command` frames from the terminal panel.
 
 The agent run happens in its own task so `cancel` can interrupt it mid-tool.
+A terminal command runs in its own task too, so the user can run `ls` while
+the agent is thinking; it shares the sandbox, not the run.
 
 The full event contract lives in `app/events.py`.
 """
@@ -14,10 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
-from app import cancel
+from app import autocommit, cancel
 from app import memory
 from app.api import rerun
 from app import events as ev
@@ -28,6 +33,11 @@ from app.api.ownership import owns_row
 from app.credits import InsufficientCredits, ensure_can_start, prime_balance
 from app.api.ratelimit import RateLimiter
 from app.config import get_settings
+from app.security import (
+    reject_foreign_origin,
+    websocket_client_key,
+    websocket_token,
+)
 from app.db import repository
 from app.emitter import Emitter, registry
 from app.llm_router import (
@@ -41,13 +51,22 @@ from app.llm_router import (
     resolve_stored_model,
     section_default_model,
 )
+from app.tools.impl import run_terminal_command
 from app.tools.preview import preview_manager
 from app.tools.sandbox import sandbox_manager
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
+#: The longest command the terminal panel accepts. Anything a person types by
+#: hand is far shorter; a frame past this is a script pasted in by mistake.
+MAX_TERMINAL_COMMAND_CHARS = 4_000
+
 _limiter = RateLimiter(get_settings().rate_limit_messages_per_minute)
+#: Connections per client address. The message limiter above is keyed by
+#: session id, which the client mints, so on its own it bounded nothing a
+#: determined caller could not sidestep with a fresh id per message.
+_connect_limiter = RateLimiter(60)
 
 
 @router.websocket("/ws/{session_id}")
@@ -67,6 +86,18 @@ async def agent_socket(
     """
     settings = get_settings()
     section = section if section in ("chat", "code") else "chat"
+
+    # CORS does not cover websockets. Without this any page could open a
+    # visitor's session from their browser.
+    if await reject_foreign_origin(websocket):
+        return
+    allowed, retry_after = _connect_limiter.check(websocket_client_key(websocket))
+    if not allowed:
+        await websocket.close(code=4429, reason=f"Too many connections; retry in {retry_after}s")
+        return
+    # The token rides in a subprotocol rather than the URL, so it stays out of
+    # access logs; `?token=` is still read for older clients.
+    token, subprotocol = websocket_token(websocket, token)
 
     # Two independent round trips — verifying the token against Supabase Auth,
     # and reading the session row — that used to run one after the other, for
@@ -92,7 +123,7 @@ async def agent_socket(
         await websocket.close(code=4403, reason="Forbidden")
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=subprotocol)
 
     emitter = Emitter()
     # Bound to the session as well as registered by id: the live preview emits
@@ -101,6 +132,10 @@ async def agent_socket(
     registry.register(emitter, session_id)
     writer = asyncio.create_task(_writer(websocket, emitter))
     run_task: asyncio.Task | None = None
+    # The user's own shell command, when one is running. One at a time per
+    # socket — the panel is a single terminal, and two commands interleaving
+    # their output in it would be unreadable.
+    terminal_task: asyncio.Task | None = None
 
     # Tell the browser it is live before touching the database — the UI gates
     # its composer on this event and has no reason to wait on Supabase.
@@ -153,9 +188,23 @@ async def agent_socket(
         # and the message writes during a run are fired rather than awaited, so
         # the row has to exist before the user can send anything. It happens
         # once per session, while the composer is still empty.
-        await repository.create_session(
+        fresh = await repository.create_session(
             session_id, user_id, model_id=current_model, section=section
         )
+        if not fresh.get("persisted", True):
+            # The insert failed, twice, and every `messages` and `token_usage`
+            # write for the rest of this session will fail its foreign key —
+            # each one logged at warning and swallowed, so the run itself works
+            # and nothing tells the user until the conversation is missing from
+            # their history. Say it now, while the composer is still empty and
+            # the choice of whether to type is still theirs.
+            emitter.emit(
+                ev.notice(
+                    "This conversation is not being saved — the database "
+                    "would not accept the session. You can carry on, but "
+                    "reloading will lose it."
+                )
+            )
     _emit_model(emitter, current_model)
     if model_notice:
         emitter.emit(ev.notice(model_notice))
@@ -185,6 +234,34 @@ async def agent_socket(
                 # app/cancel.py and app/turnstop.py.
                 if run_task and not run_task.done():
                     cancel.request_stop(session_id)
+                continue
+
+            if kind == "terminal_command":
+                # A command the user typed into the terminal panel. It goes
+                # to the same sandbox the agent's tools use, through
+                # `sandbox_manager.get` — same lazy creation, same keepalive,
+                # same idle reaper — so nothing here is a second lifecycle.
+                # It is *not* gated on `run_task`: reading the tree or the
+                # logs while the agent works is the normal use, and the
+                # sandbox runs commands concurrently. What it is gated on is
+                # itself — one command at a time.
+                command = str(frame.get("command") or "").strip()
+                if not command:
+                    emitter.emit(ev.error("Empty command."))
+                    continue
+                if len(command) > MAX_TERMINAL_COMMAND_CHARS:
+                    emitter.emit(ev.error("That command is too long for the terminal."))
+                    continue
+                if terminal_task and not terminal_task.done():
+                    emitter.emit(
+                        ev.error("A terminal command is still running — wait for it to finish.")
+                    )
+                    continue
+                terminal_task = asyncio.create_task(
+                    run_terminal_command(
+                        session_id, command, f"term_{uuid.uuid4().hex[:12]}", emitter
+                    )
+                )
                 continue
 
             if kind == "set_model":
@@ -297,11 +374,32 @@ async def agent_socket(
 
     except WebSocketDisconnect:
         pass
+    except RuntimeError:
+        # A client that vanishes mid-stream reaches the two tasks by different
+        # routes, and only one of them is called `WebSocketDisconnect`. The
+        # writer notices first: its next `send` fails with `OSError`, which
+        # Starlette turns into `application_state = DISCONNECTED` plus a
+        # `WebSocketDisconnect(1006)` that the writer swallows. The reader is
+        # parked in `receive_json`, which checks that same state on the way in
+        # and raises a bare `RuntimeError("...Need to call accept first")`
+        # instead — the wrong name for what happened, and nothing a caller can
+        # match on.
+        #
+        # So the state is what gets asked, not the exception type: a socket
+        # that is no longer connected has disconnected, however it was
+        # reported. Every browser refresh during a run was logging this with a
+        # full traceback at ERROR, which is the level real failures use.
+        # A RuntimeError raised while the socket is still up is still a bug and
+        # is still logged as one.
+        if websocket.application_state is WebSocketState.CONNECTED:
+            log.exception("Websocket loop failed for session %s", session_id)
     except Exception:  # noqa: BLE001
         log.exception("Websocket loop failed for session %s", session_id)
     finally:
         if run_task and not run_task.done():
             run_task.cancel()
+        if terminal_task and not terminal_task.done():
+            terminal_task.cancel()
         emitter.close()
         registry.unregister(emitter.id)
         writer.cancel()
@@ -515,6 +613,14 @@ async def _run(
             project_id=project_id,
         )
         reason = final.get("stop_reason") or "end_turn"
+        # The end-of-turn commit and push, for a Code repository that opted
+        # in. Before `agent_done` on purpose: that frame re-arms the composer,
+        # and the commit belongs to the turn the user is reading, not to the
+        # gap after it. A stopped or failed turn is left uncommitted — what it
+        # wrote is half of something, and recording it is not what "auto" was
+        # meant to mean. `commit_turn` never raises; see its docstring.
+        if section == "code" and reason == "end_turn":
+            await autocommit.commit_turn(session_id, user_id, emitter)
         if reason != "max_iterations":
             emitter.emit(ev.agent_done(int(final.get("iterations") or 0), reason))
         # Learn from the exchange, after the user has their answer and off the

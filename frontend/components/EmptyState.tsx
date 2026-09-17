@@ -9,6 +9,7 @@ import {
   TerminalSquare,
   Wand2,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
 import type { Section } from "@/lib/sections";
 import { SPRING_SOFT, useMotionOK } from "./Anim";
@@ -56,10 +57,29 @@ export function SectionEmptyState({
 }) {
   const motionOK = useMotionOK();
   const starters = startersFor(section, { onUse, onOpenFolder });
+  // The command palette is the deepest keyboard surface in the app and the
+  // only way to discover it was a small search-shaped button hidden below
+  // `sm`. One line here, until the palette has been opened once.
+  const [showPaletteHint, setShowPaletteHint] = useState(false);
+  useEffect(() => {
+    try {
+      setShowPaletteHint(!localStorage.getItem(PALETTE_USED_KEY));
+    } catch {
+      /* storage unavailable: no hint, nothing lost */
+    }
+  }, []);
   if (!starters.length) return null;
 
   return (
     <div className={cn("grid gap-2 sm:grid-cols-2", className)}>
+      {showPaletteHint && (
+        <p className="font-sans text-2xs text-ink-faint sm:col-span-2">
+          <kbd className="rounded-inner border border-line bg-raised px-1.5 py-0.5 font-mono text-2xs text-ink-muted">
+            {isApple() ? "⌘K" : "Ctrl K"}
+          </kbd>{" "}
+          opens the command palette: switch models, open files, run anything here.
+        </p>
+      )}
       {starters.map((starter, i) => (
         <motion.button
           key={starter.label}
@@ -75,7 +95,7 @@ export function SectionEmptyState({
           }}
           className={cn(
             "group/starter flex items-start gap-3 rounded-card border border-line bg-elevated",
-            "px-3.5 py-3 text-left transition-all duration-200",
+            "px-3.5 py-3 text-left transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
             "hover:border-accent-line hover:bg-raised active:scale-[0.99]",
           )}
         >
@@ -107,6 +127,14 @@ export function SectionEmptyState({
       ))}
     </div>
   );
+}
+
+/** Set by the palette the first time it opens; read here to retire the hint. */
+export const PALETTE_USED_KEY = "loom.palette.used";
+
+function isApple(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
 }
 
 function startersFor(

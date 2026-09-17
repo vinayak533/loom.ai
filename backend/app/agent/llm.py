@@ -29,10 +29,59 @@ log = logging.getLogger(__name__)
 #: Preference order for the throwaway model that names a session. First one
 #: whose key is configured wins; the session default is the last resort.
 #:
-#: Deliberately no OpenCode models here. They are reasoning models that spend
-#: output budget thinking before they emit any text, so a 32-token call to one
-#: comes back empty — see the note on ``OpenCodeAdapter``.
-TITLE_MODELS = ("gpt-oss-120b", "llama-4-scout", "nemotron-3")
+#: Excluding OpenCode was once thought to be what kept reasoning out of this
+#: call. It is not, and believing it was cost every session its name: two of
+#: the three models here reason too. `gpt-oss-120b` used to lead — and so
+#: answered in every deployment with a Groq key — and returned the empty-turn
+#: placeholder on 3 of 3 probes at both 32 and 128 tokens. `nemotron-3` did
+#: the same. `llama-4-scout` answered 3 of 3 at 32, because it is the only one
+#: here that does not think first.
+#:
+#: So it leads now, and the second reason is the one that settles it. Groq's
+#: free tier bills this call against an 8000 token-per-minute budget *by its
+#: ceiling rather than its output* — the constraint `groq_max_tokens` is
+#: pinned at 4000 for, documented in `config.py`. Naming a session on Groq
+#: therefore spent ~600 TPM of the same allowance the app itself needs, and
+#: probing at ten calls a minute produced a steady stream of
+#: `429 ... Limit 8000, Used 7434` with the router falling through to
+#: `nemotron-3` — which at this budget is the model most likely to answer with
+#: nothing. An intermittently unnamed session was the visible end of that.
+#:
+#: `llama-4-scout` is on OpenRouter, so naming costs Groq's budget nothing and
+#: leaves the whole 8000 for real work. Measured at 10/10 usable and a 1.24s
+#: median, against 10/10 and 1.61s for the model it replaces at the top.
+#:
+#: The reasoning models stay as fallbacks, which is why :data:`TITLE_MAX_TOKENS`
+#: is still sized for a preamble: the router can route past the leader, and a
+#: fallback that cannot answer is not a fallback.
+TITLE_MODELS = ("llama-4-scout", "gpt-oss-120b", "nemotron-3")
+
+#: Output budget for naming a session from its opening message.
+#:
+#: Sized for the preamble, not for the answer. A name is a handful of tokens
+#: and 32 was budgeted for exactly that, which is why a reasoning model came
+#: back with nothing to store: it spent the whole allowance thinking and the
+#: turn ended before any text. Probed against the live roster, 128 was still
+#: 0/3 for both reasoning models and 512 was 3/3 for all three — so this is
+#: the smallest verified ceiling with room to spare, not a guess.
+#:
+#: The unused headroom is not billed: usage is reported from tokens actually
+#: produced, and `llama-4-scout` still answers in about thirty of them.
+TITLE_MAX_TOKENS = 512
+
+#: Output budget for naming a *project* from its transcript. Twice the above,
+#: and the difference is not padding: how long a model reasons scales with how
+#: much it was given to read, and these two calls differ by two orders of
+#: magnitude — one opening message against up to 14000 characters of
+#: transcript. Measured on the live roster rather than assumed: at 512 a short
+#: transcript came back usable 5 times in 6 and a full-length one only 3 times
+#: in 6, which is the shape of a budget that is almost enough. At 1024 the
+#: full-length transcript was 10 for 10.
+#:
+#: Worth keeping distinct from :data:`TITLE_MAX_TOKENS` rather than raising
+#: both: the title call runs on the first message of every session and this
+#: one runs on demand, so they are not the same thing to be generous with.
+PROJECT_META_MAX_TOKENS = 1024
 
 
 #: The shapes a session title must not have.
@@ -78,6 +127,22 @@ TITLE_REJECTS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     # A heading, a fence or a line break means a document was stored in a
     # column that holds a phrase.
     ("markdown document", re.compile(r"^\s*(#{1,6}\s|```)|\n")),
+    # A title that opens on a bare word-ending is the front of its first token
+    # missing. `llama-4-scout` returns "ing Graph State During Restart" for a
+    # question it otherwise names "Checkpointing Graph State During Restart",
+    # about once in twenty. The loss happens upstream — the block arrives from
+    # the provider already short — so there is nothing to repair here, only
+    # something to refuse, on the same principle as the rest of this tuple.
+    #
+    # Deliberately narrow. "Starts with a lowercase letter" would catch this
+    # and also throw away `iOS build fails on CI`, which is a good name.
+    # Matching the few suffixes that cannot open an English word costs no real
+    # titles and still catches the shape that actually occurs. The `\b` is
+    # what keeps `Ingesting`, `Integration` and `Mention` out of it.
+    (
+        "truncated first word",
+        re.compile(r"^(ing|tion|ment|ness|ised|ized|edly|ally)\b", re.I),
+    ),
 )
 
 #: Above this, the answer is prose rather than a name. The prompt asks for
@@ -125,7 +190,7 @@ async def generate_title(first_message: str) -> str | None:
             model_id,
             messages=[{"role": "user", "content": TITLE_PROMPT + first_message[:1000]}],
             tools=[],
-            max_tokens=32,
+            max_tokens=TITLE_MAX_TOKENS,
             section="title",
         )
     except (ModelUnavailableError, ModelCallError):
@@ -175,7 +240,7 @@ async def generate_project_meta(transcript: str) -> dict | None:
                 {"role": "user", "content": PROJECT_META_PROMPT + transcript[:14000]}
             ],
             tools=[],
-            max_tokens=160,
+            max_tokens=PROJECT_META_MAX_TOKENS,
             section="project_meta",
         )
     except (ModelUnavailableError, ModelCallError):
@@ -202,6 +267,14 @@ def _parse_project_meta(text: str) -> dict | None:
     name in quotes. Prefixes are matched loosely and a reply with no labels at
     all falls back to its first two non-empty lines, because a usable name from
     a malformed answer beats discarding the call.
+
+    That fallback is also the hole this function had. An answer with no `NAME:`
+    in it is not always a decorated name — it is also what a turn that produced
+    no text looks like, and the router's placeholder sentence has no labels, so
+    it became `leftovers[0]` and was stored, clipped to 80 characters, as the
+    project's name. `generate_title` already refused that shape; nothing here
+    did. The same guard runs on the parsed name now, which also picks up the
+    other two ways a naming call answers with something that is not a name.
     """
     name = ""
     about = ""
@@ -226,6 +299,8 @@ def _parse_project_meta(text: str) -> dict | None:
 
     name = name.strip().strip('"').strip("*").strip()
     about = about.strip().strip('"').strip("*").strip()
-    if not name:
+    reason = title_rejection(name)
+    if reason:
+        log.info("Discarding project name (%s): %r", reason, name[:80])
         return None
     return {"title": name[:80], "description": about[:200]}

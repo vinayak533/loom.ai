@@ -527,9 +527,34 @@ async def _flush_pending(client) -> int | None:
             )
             _spill_save()
             return None
+        # The balance now reflects these rows, so the rows must say so. They
+        # were upserted a moment ago carrying `balance_applied = false` —
+        # correctly, since at that point it was false — and leaving them that
+        # way would have reconciliation report every recovered outage as a
+        # discrepancy for ever. One update per account, and a flush is rare.
+        settled = [
+            row["id"]
+            for row in _PENDING
+            if row["user_id"] == account and not row.get("_applied") and row.get("id")
+        ]
         for row in _PENDING:
             if row["user_id"] == account:
                 row["_applied"] = True
+                row["balance_applied"] = True
+        if settled and _LEDGER_HAS_APPLIED is not False:
+            try:
+                await asyncio.to_thread(
+                    lambda ids=settled: client.table("credit_ledger")
+                    .update({"balance_applied": True})
+                    .in_("id", ids)
+                    .execute()
+                )
+            except Exception:  # noqa: BLE001 - cosmetic for reconciliation only
+                log.warning(
+                    "Could not mark %d flushed ledger row(s) for `%s` as "
+                    "applied; reconciliation will report them.",
+                    len(settled), account, exc_info=True,
+                )
         _spill_save()
 
     flushed = len(_PENDING)
@@ -543,14 +568,20 @@ async def _flush_pending(client) -> int | None:
     return flushed
 
 
-def _buffer(row: dict[str, Any]) -> None:
+def _buffer(row: dict[str, Any]) -> dict[str, Any]:
     """Hold a movement that could not be written durably.
 
     The defaults come first so a caller that already knows one half landed —
     `balance_written` in :func:`_append_ledger` — can say so and not have it
     overwritten.
+
+    Returns the entry that was appended, so a debit whose balance write lands
+    *after* its ledger row can come back and flip `_applied` on this exact row
+    (see :func:`_mark_applied`). Without the reference the flush would move the
+    balance a second time and turn a recovered outage into a double charge.
     """
-    _PENDING.append({"_written": False, "_applied": False, **row})
+    held = {"_written": False, "_applied": False, **row}
+    _PENDING.append(held)
     if len(_PENDING) == _PENDING_ALARM:
         log.error(
             "The credit buffer has reached %d unflushed movements. The durable "
@@ -559,6 +590,7 @@ def _buffer(row: dict[str, Any]) -> None:
             _PENDING_ALARM, _DEGRADED_SINCE,
         )
     _spill_save()
+    return held
 
 
 # --- the spill file --------------------------------------------------------
@@ -750,24 +782,103 @@ async def get_balance(user_id: str | None) -> Balance:
 
     # First sight of this user. The opening grant is a ledger movement like any
     # other, so a balance is always the sum of its history.
+    #
+    # Creation has to be idempotent, and it was not. A new user's first moments
+    # fire three of these at once — `GET /api/credits` for the header, the
+    # socket connect, and `ensure_can_start` for the first turn — and all three
+    # read no row and all three created one. The old `upsert(row)` is an
+    # `ON CONFLICT DO UPDATE`: whichever call landed last wrote `balance` and
+    # `spent` back to their opening values, erasing any charge that had already
+    # been debited in between, and each call appended its own "Opening balance"
+    # ledger row, so the history then claimed three grants for one account.
+    #
+    # Two guards, because there are two races and one guard cannot close both:
+    #
+    #   * `_LOCK` serialises the in-process case — which is the one that
+    #     actually happens, since those three callers share a process — and the
+    #     re-read inside it means the second and third callers find the row the
+    #     first one wrote and take the ordinary path;
+    #   * `ignore_duplicates=True` closes the cross-process case. `user_id` is
+    #     already this table's primary key, so the constraint needed no
+    #     migration; what was missing was asking PostgREST for
+    #     `ON CONFLICT DO NOTHING` rather than `DO UPDATE`. A losing insert now
+    #     returns no rows and changes nothing, instead of overwriting a live
+    #     balance with an opening one.
+    #
+    # `_durable()` was resolved above and `_append_ledger` resolves it again,
+    # so the ledger append stays outside the lock: a recovery flush takes
+    # `_LOCK` itself, and `asyncio.Lock` is not reentrant.
     opening = settings.credit_starting_balance
-    row = {
-        "user_id": account,
-        "balance": opening,
-        "granted": opening,
-        "spent": 0,
-        "created_at": _now(),
-        "updated_at": _now(),
-    }
-    created = await _safe(
-        lambda: client.table("user_credits").upsert(row).execute(),
-        "creating the account",
-    )
-    if created is None:
+    created_here = False
+
+    async with _LOCK:
+        # Re-read under the lock. Whoever held it before this call may have
+        # created the account already, in which case there is nothing to do and
+        # — this is the part that matters — nothing to overwrite.
+        res = await _safe(_read, "re-reading the balance before creating it")
+        rows = getattr(res, "data", None) or [] if res is not None else []
+        if res is None:
+            entry = _local(account)
+            return Balance(account, entry.balance, entry.granted, entry.spent)
+
+        if not rows:
+            row = {
+                "user_id": account,
+                "balance": opening,
+                "granted": opening,
+                "spent": 0,
+                "created_at": _now(),
+                "updated_at": _now(),
+            }
+            created = await _safe(
+                lambda: client.table("user_credits")
+                .upsert(row, ignore_duplicates=True)
+                .execute(),
+                "creating the account",
+            )
+            if created is None:
+                entry = _local(account)
+                return Balance(account, entry.balance, entry.granted, entry.spent)
+            # PostgREST returns the rows it actually inserted. Empty means
+            # another process got there first, so this call created nothing and
+            # must not claim the grant.
+            created_here = bool(getattr(created, "data", None))
+
+            if not created_here:
+                res = await _safe(_read, "reading the account another writer created")
+                rows = getattr(res, "data", None) or [] if res is not None else []
+                if res is None:
+                    entry = _local(account)
+                    return Balance(account, entry.balance, entry.granted, entry.spent)
+
+    if not created_here:
+        # Someone else created it — either before this call took the lock or
+        # underneath it. Whatever the row says now is the truth, including any
+        # charge that has already landed against it.
+        if rows:
+            row = rows[0]
+            balance = Balance(
+                account,
+                float(row.get("balance") or 0),
+                float(row.get("granted") or 0),
+                float(row.get("spent") or 0),
+            )
+            _LAST_KNOWN[account] = (balance.balance, balance.granted, balance.spent)
+            return balance
+        # The insert reported no rows and the re-read found none either. Not a
+        # state that should be reachable, but guessing an opening balance here
+        # is how an account gets granted twice; degrade instead.
+        log.warning(
+            "Credit account %s neither created nor found; serving locally.",
+            account,
+        )
         entry = _local(account)
         return Balance(account, entry.balance, entry.granted, entry.spent)
-    # The upsert above already wrote the opening balance, so if this row has to
-    # be buffered it must not move the balance a second time on flush.
+
+    # This call created the row, so this call — and only this call — records
+    # the grant. The insert above already wrote the opening balance, so if the
+    # ledger row has to be buffered it must not move the balance a second time
+    # on flush.
     await _append_ledger(
         account, None, None, "grant", opening, "Opening balance",
         balance_written=True,
@@ -1006,14 +1117,37 @@ async def _debit(
     # The balance is allowed to go negative. See the module docstring: an
     # overdraw is a fact to record, not one to hide by clamping.
     #
-    # `balance_written` is carried to `_append_ledger` because the two halves
-    # of a movement can fail independently. If the balance moved durably but
-    # the ledger row did not, the buffered row must be marked as already
-    # applied — otherwise the flush would move the balance a second time and
-    # turn a recovered outage into a double charge.
     # Outside the lock: see the note in `grant`. A recovery flush needs `_LOCK`,
     # so nothing may resolve durability while already holding it.
     durable = await _durable()
+
+    # --- the ledger row goes first ----------------------------------------
+    # These two writes are two round trips and cannot be made one. What is in
+    # our gift is which of them a crash lands between, and the orders are not
+    # equivalent:
+    #
+    #   balance then ledger  — a crash leaves credits deducted with no row
+    #                          explaining them. Nothing can recover that: the
+    #                          spill file only holds movements whose durable
+    #                          write *returned* a failure, and a process that
+    #                          died returned nothing. The charge is
+    #                          unattributable and the account's own history
+    #                          disagrees with its balance, permanently.
+    #   ledger then balance  — a crash leaves a movement recorded and marked
+    #                          `balance_applied = false`. The ledger is the
+    #                          authority (see the module docstring: a balance is
+    #                          the sum of its history), so the row is enough to
+    #                          finish the job. `scripts/reconcile_credits.py`
+    #                          finds exactly these.
+    #
+    # So: append, move, then mark the row applied. A crash after the move but
+    # before the mark leaves a row that merely *looks* unfinished, which is why
+    # reconciliation recomputes each account from the ledger sum rather than
+    # replaying individual rows — recomputing is idempotent, replaying is not.
+    handle = await _append_ledger(
+        account, session_id, agent_id, kind, -amount, reason,
+        model_id=model_id, balance_written=False,
+    )
 
     balance_written = False
     async with _LOCK:
@@ -1079,10 +1213,99 @@ async def _debit(
                         patch["spent"],
                     )
 
-    await _append_ledger(
-        account, session_id, agent_id, kind, -amount, reason,
-        model_id=model_id, balance_written=balance_written,
+    # Outside the lock for the same reason the append was: this can reach the
+    # store, and reaching the store can trigger a recovery flush that needs
+    # `_LOCK` itself.
+    if balance_written:
+        await _mark_applied(handle)
+
+
+#: Whether `credit_ledger.balance_applied` exists in the live database.
+#: `None` until the first insert proves it either way.
+#:
+#: The column arrives with `schema.sql`, and a deploy that has not run
+#: `scripts/apply_schema.py` yet does not have it. Without this probe the very
+#: first debit after such a deploy would fail its insert, `_safe` would read
+#: that as the store being unreachable, and the whole meter would degrade to
+#: in-process accounting over a missing boolean — turning a cosmetic gap in
+#: reconciliation into every balance in the product going stale. So the column
+#: is treated as an enhancement: used when present, dropped when not, and the
+#: absence is logged once rather than every call.
+_LEDGER_HAS_APPLIED: bool | None = None
+
+
+def _is_missing_applied_column(exc: Exception) -> bool:
+    """True when this failure is the column being absent, not the store being
+    down. Postgres reports `column x does not exist` under SQLSTATE 42703 and
+    PostgREST passes both through, so either is accepted — the client wraps the
+    error differently depending on which layer rejected it. The column name is
+    required in the text as well, so an unrelated 42703 is not mistaken for
+    this one.
+    """
+    text = str(exc).lower()
+    return "balance_applied" in text and (
+        "does not exist" in text or "42703" in text or "column" in text
     )
+
+
+async def _insert_ledger_row(client, row: dict[str, Any]):
+    """Insert one ledger row, tolerating a database without `balance_applied`.
+
+    Returns the result, or ``None`` if the write genuinely failed — the same
+    contract as :func:`_safe`, and it calls :func:`_degrade` on a real failure
+    for the same reason. A missing column is not a real failure and must not
+    degrade the meter.
+    """
+    global _LEDGER_HAS_APPLIED
+
+    payload = dict(row)
+    if _LEDGER_HAS_APPLIED is False:
+        payload.pop("balance_applied", None)
+
+    try:
+        result = await asyncio.to_thread(
+            lambda: client.table("credit_ledger").insert(payload).execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        if _LEDGER_HAS_APPLIED is None and _is_missing_applied_column(exc):
+            _LEDGER_HAS_APPLIED = False
+            log.warning(
+                "`credit_ledger.balance_applied` is missing from the database, "
+                "so the half-written-movement marker is unavailable and "
+                "`scripts/reconcile_credits.py` cannot tell a crashed debit "
+                "from a finished one. Run `python -m scripts.apply_schema` to "
+                "add it. Charging continues without it."
+            )
+            payload.pop("balance_applied", None)
+            return await _safe(
+                lambda: client.table("credit_ledger").insert(payload).execute(),
+                "appending to the ledger",
+            )
+        log.warning("Credit store failed while appending to the ledger", exc_info=True)
+        _degrade(f"{type(exc).__name__} while appending to the ledger")
+        return None
+
+    if _LEDGER_HAS_APPLIED is None:
+        _LEDGER_HAS_APPLIED = True
+    return result
+
+
+@dataclass
+class _LedgerHandle:
+    """Where one appended movement ended up, so a caller can finish it.
+
+    A debit writes its ledger row before it moves the balance, and then has to
+    come back and say the balance moved. That second step lands in a different
+    place depending on where the first one did — the durable table, or the
+    in-memory buffer — so :func:`_append_ledger` hands back this rather than
+    leaving the caller to work it out.
+    """
+
+    row_id: str
+    #: The row reached `credit_ledger`.
+    durable: bool
+    #: The `_PENDING` entry holding it, when it did not.
+    buffered: dict[str, Any] | None = None
 
 
 async def _append_ledger(
@@ -1094,13 +1317,18 @@ async def _append_ledger(
     reason: str,
     model_id: str | None = None,
     balance_written: bool = False,
-) -> None:
+) -> _LedgerHandle:
     """Record one movement — durably if possible, into the buffer if not.
 
     Every movement in the system passes through here, which is what makes
     "nothing is discarded" enforceable in one place. When the durable write
     cannot happen the row goes to :func:`_buffer`, which holds it in memory
     *and* on disk until a flush succeeds.
+
+    ``balance_written`` says whether the balance columns already reflect this
+    movement. A grant passes True, having moved the balance first. A debit
+    passes False, because it has not moved it yet, and calls
+    :func:`_mark_applied` with the returned handle once it has.
     """
     row = {
         "id": str(uuid.uuid4()),
@@ -1111,9 +1339,10 @@ async def _append_ledger(
         "amount": round(amount, 4),
         "reason": reason,
         "model_id": model_id,
+        "balance_applied": balance_written,
         "created_at": _now(),
     }
-    def _hold() -> None:
+    def _hold() -> _LedgerHandle:
         # `_PENDING` is the record that gets flushed; this is the local view
         # `recent_ledger` serves while the store is away. Deliberately only
         # touched on the degraded path: creating the in-process account during
@@ -1122,18 +1351,52 @@ async def _append_ledger(
         entry = _local(account)
         entry.ledger.append(row)
         del entry.ledger[:-200]
-        _buffer({**row, "_applied": balance_written})
+        held = _buffer({**row, "_applied": balance_written})
+        return _LedgerHandle(row["id"], durable=False, buffered=held)
 
     if not await _durable():
-        _hold()
+        return _hold()
+    client = get_client()
+    written = await _insert_ledger_row(client, row)
+    if written is None:
+        return _hold()
+    return _LedgerHandle(row["id"], durable=True)
+
+
+async def _mark_applied(handle: _LedgerHandle) -> None:
+    """Say that the balance now reflects an already-appended movement.
+
+    Best-effort on purpose. Failing here leaves a durable row reading
+    `balance_applied = false` when the balance did in fact move — which
+    reconciliation reports as a discrepancy to *look at*, and resolves by
+    recomputing from the ledger sum rather than by replaying the row. An
+    over-report is a nuisance; the under-report the old ordering produced was a
+    charge with no history at all.
+    """
+    if handle.buffered is not None:
+        # Both flags: `_applied` stops the flush moving the balance a second
+        # time, and `balance_applied` is the column the row carries into the
+        # table when it is finally written.
+        handle.buffered["_applied"] = True
+        handle.buffered["balance_applied"] = True
+        _spill_save()
+        return
+    if not handle.durable:
+        return
+    if _LEDGER_HAS_APPLIED is False:
+        # No column to mark. The row is still in the ledger, which is the part
+        # that matters; reconciliation falls back to comparing sums.
+        return
+    if not await _durable():
         return
     client = get_client()
-    written = await _safe(
-        lambda: client.table("credit_ledger").insert(row).execute(),
-        "appending to the ledger",
+    await _safe(
+        lambda: client.table("credit_ledger")
+        .update({"balance_applied": True})
+        .eq("id", handle.row_id)
+        .execute(),
+        "marking a ledger row applied",
     )
-    if written is None:
-        _hold()
 
 
 async def recent_ledger(user_id: str | None, limit: int = 25) -> list[dict]:

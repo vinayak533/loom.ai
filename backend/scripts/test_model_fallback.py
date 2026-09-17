@@ -503,7 +503,6 @@ async def case_through_the_graph() -> None:
     print("\n11. Through the real agent node: selection, billing, error surface")
     from langgraph.checkpoint.memory import MemorySaver  # noqa: F401  (import cost)
 
-    from app import events as ev  # noqa: F811
     from app.agent import graph as g
     from app.emitter import Emitter
     import app.emitter as em

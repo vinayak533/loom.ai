@@ -128,6 +128,81 @@ async def bash_execute(
     )
 
 
+async def run_terminal_command(
+    session_id: str, command: str, call_id: str, emitter: Emitter | None
+) -> dict:
+    """A command the *user* typed into the terminal panel.
+
+    The same sandbox, the same `sandbox_manager.get` — so the same lazy
+    creation, keepalive and idle reaper the agent's tools go through — and the
+    same streamed `tool_output_chunk` frames. What differs is the framing:
+    `terminal_started` / `terminal_exit` instead of a tool call, because this
+    is not something the agent did and must not appear in the transcript as
+    one, and a longer timeout, because a person typing `npm install` expects
+    to wait for it rather than be told to background it.
+
+    Returns a small dict for callers that are not on a socket (tests).
+    """
+    command = (command or "").strip()
+    if not command:
+        return {"exit_code": 1, "error": "empty command"}
+
+    settings = get_settings()
+    if emitter:
+        emitter.emit(ev.terminal_started(call_id, command))
+    try:
+        sandbox = await sandbox_manager.get(session_id)
+    except SandboxUnavailable as exc:
+        if emitter:
+            emitter.emit(ev.tool_output_chunk(call_id, "stderr", f"{exc}\n"))
+            emitter.emit(ev.terminal_exit(call_id, 1))
+        return {"exit_code": 1, "error": str(exc)}
+
+    def on_stdout(chunk: str) -> None:
+        if emitter:
+            emitter.emit(ev.tool_output_chunk(call_id, "stdout", chunk))
+
+    def on_stderr(chunk: str) -> None:
+        if emitter:
+            emitter.emit(ev.tool_output_chunk(call_id, "stderr", chunk))
+
+    timed_out = False
+    try:
+        result = await sandbox.commands.run(
+            command,
+            cwd=WORKDIR,
+            timeout=settings.terminal_timeout_seconds,
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
+        )
+        exit_code = result.exit_code or 0
+    except Exception as exc:  # noqa: BLE001 - non-zero exit raises in the SDK
+        exit_code = getattr(exc, "exit_code", None)
+        name = type(exc).__name__
+        timed_out = exit_code is None and "timeout" in name.lower()
+        if exit_code is None:
+            exit_code = 124 if timed_out else 1
+            # A timeout or transport failure produced no exit line of its own;
+            # say what happened where the output was going.
+            if emitter:
+                text = (
+                    f"[terminal] command timed out after "
+                    f"{settings.terminal_timeout_seconds}s\n"
+                    if timed_out
+                    else f"[terminal] {name}: {exc}\n"
+                )
+                emitter.emit(ev.tool_output_chunk(call_id, "stderr", text))
+        # A plain non-zero exit already streamed its stdout/stderr through the
+        # callbacks above; nothing to add.
+
+    if emitter:
+        emitter.emit(ev.terminal_exit(call_id, exit_code, timed_out=timed_out))
+    # The user may have just created files (`npm init`, `git clone`); the tree
+    # refresh is the same background walk the agent's commands trigger.
+    _refresh_tree_later(sandbox, session_id, emitter)
+    return {"exit_code": exit_code, "timed_out": timed_out}
+
+
 # ---------------------------------------------------------------------------
 # files
 # ---------------------------------------------------------------------------
@@ -373,7 +448,7 @@ async def _walk(sandbox, path: str, depth: int, budget: list[int]) -> list[dict]
         children = await asyncio.gather(
             *(_walk(sandbox, node["path"], depth - 1, budget) for node in subdirs)
         )
-        for node, kids in zip(subdirs, children):
+        for node, kids in zip(subdirs, children, strict=True):
             node["children"] = kids
 
     nodes.sort(key=lambda n: (n["type"] != "dir", n["name"].lower()))
@@ -549,11 +624,41 @@ async def git_tool(
             await git.create_branch(session_id, name)
             body = f"Created and switched to `{name}`."
 
+        elif operation == "remote":
+            url = (args.get("url") or "").strip()
+            if url:
+                info = await git.set_remote(session_id, url)
+                body = (
+                    f"Remote `origin` now points at {info['remote']}."
+                    + (" (replaced the previous URL)" if info.get("replaced") else "")
+                )
+            else:
+                current = await git.remote_url(session_id)
+                body = (
+                    f"Remote `origin`: {current}"
+                    if current
+                    else "No remote is configured. Pass `url` to set one, or ask "
+                    "the user to set it in their History panel."
+                )
+
+        elif operation == "push":
+            result = await git.push(
+                session_id, token=get_settings().git_push_token or None
+            )
+            if not result.get("pushed"):
+                body = result.get("reason") or "Nothing was pushed."
+            else:
+                c = result.get("commit") or {}
+                body = (
+                    f"Pushed `{result['branch']}` to {result['remote']} "
+                    f"(head {c.get('short', '')}: {c.get('subject', '')})."
+                )
+
         else:
             return ToolResult(
                 f"Error: unknown git operation `{operation}`. Use one of: "
                 "init, status, diff, commit, log, branch, new_branch, "
-                "checkout, merge.",
+                "checkout, merge, remote, push.",
                 success=False,
             )
     except git.GitError as exc:
@@ -569,6 +674,8 @@ async def git_tool(
                     status=snap["status"],
                     log=snap["log"],
                     path=snap["path"],
+                    remote=snap.get("remote"),
+                    auto_push=bool(snap.get("auto_push")),
                 )
             )
         except Exception:  # noqa: BLE001

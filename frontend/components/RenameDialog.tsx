@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import { SPRING_SNAP, useMotionOK } from "./Anim";
+import { useFocusTrap } from "@/lib/useFocusTrap";
 
 /**
  * Name and describe a session as a *project*.
@@ -42,7 +43,11 @@ export function RenameDialog({
   const [name, setName] = useState(title);
   const [about, setAbout] = useState(description);
   const input = useRef<HTMLInputElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
   const motionOK = useMotionOK();
+  // The dialog selects its own name field on open; the trap still keeps Tab
+  // inside and hands focus back to the row's menu on close.
+  useFocusTrap(dialog, open, { autoFocus: false });
 
   // Re-seed whenever the dialog opens, and whenever a generate lands while it
   // is open — the parent owns the canonical values, this only edits them.
@@ -79,6 +84,7 @@ export function RenameDialog({
           />
           <motion.div
             key="rename"
+            ref={dialog}
             role="dialog"
             aria-modal="true"
             aria-label="Name this project"
@@ -116,7 +122,7 @@ export function RenameDialog({
             className="glass fixed left-1/2 top-[18vh] z-[61] w-[min(30rem,calc(100vw-2rem))]
                        overflow-hidden rounded-panel"
           >
-            <header className="flex items-center gap-2.5 border-b border-line px-4 py-3">
+            <header className="flex h-bar-sub items-center gap-2.5 border-b border-line px-4">
               <span className="sigil h-2 w-2 bg-accent" aria-hidden />
               <h2 className="voice-label text-ink-muted">Name this project</h2>
               {onGenerate && (
@@ -131,7 +137,7 @@ export function RenameDialog({
                   className={cn(
                     "ml-auto flex items-center gap-1.5 rounded-ctl px-2 py-1 text-2xs",
                     "border border-accent-line bg-accent/[0.06] text-accent",
-                    "transition-all duration-200 hover:bg-accent/[0.11]",
+                    "transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:bg-accent/[0.11]",
                     "disabled:pointer-events-none disabled:opacity-55",
                   )}
                 >
@@ -225,7 +231,7 @@ function Field({
     <label className="block">
       <span className="voice-label mb-1.5 flex items-baseline gap-2">
         {label}
-        {hint && <span className="text-ink-dim">{hint}</span>}
+        {hint && <span className="text-ink-subtle">{hint}</span>}
       </span>
       {children}
     </label>

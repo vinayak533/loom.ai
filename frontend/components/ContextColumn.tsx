@@ -47,11 +47,13 @@ export const ContextColumn = memo(function ContextColumn({
   connected,
   iterations,
   usage,
+  usageHistory,
   changed,
   activeFile,
   activeFileData,
   tree,
   treeRoot,
+  sandboxIdle = false,
   flash,
   modelName,
   routingMode,
@@ -69,11 +71,17 @@ export const ContextColumn = memo(function ContextColumn({
   onStage,
   onBranch,
   onSuggestMessage,
+  onSetRemote,
+  onPush,
+  onAutoPush,
+  canPush,
   sessionId,
   token,
   exporting,
   onToggleTerminal,
   onClearTerminal,
+  onRunCommand,
+  terminalCommandRunning = false,
   onSelectFile,
   onExport,
   onSaveFile,
@@ -90,11 +98,14 @@ export const ContextColumn = memo(function ContextColumn({
   connected: boolean;
   iterations: number;
   usage: { input: number; output: number; cost: number };
+  usageHistory?: number[];
   changed: Record<string, ChangedFile>;
   activeFile: string | null;
   activeFileData: ChangedFile | null;
   tree: FileNode[];
   treeRoot: string;
+  /** Sandbox reaped, workspace intact — see `FileTree`'s `idle`. */
+  sandboxIdle?: boolean;
   flash: Record<string, number>;
   modelName: string;
   routingMode: "manual" | "auto";
@@ -113,6 +124,15 @@ export const ContextColumn = memo(function ContextColumn({
   onStage?: (paths: string[], mode: "stage" | "unstage" | "discard") => void;
   onBranch?: (name: string, action: "create" | "checkout" | "merge") => void;
   onSuggestMessage?: () => Promise<string>;
+  onSetRemote?: (url: string) => void;
+  onPush?: () => void;
+  onAutoPush?: (enabled: boolean) => void;
+  /** The server holds a push credential; false shows a hint in the panel. */
+  canPush?: boolean;
+  /** Run a command the user typed into the terminal. Absent = output only. */
+  onRunCommand?: (command: string) => boolean;
+  /** A user-typed command is still running. */
+  terminalCommandRunning?: boolean;
   /** Both needed to measure the sandbox for the project health readout. */
   sessionId?: string | null;
   token?: string | null;
@@ -151,7 +171,7 @@ export const ContextColumn = memo(function ContextColumn({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex h-14 shrink-0 items-center gap-1 px-3">
+      <header className="flex h-bar shrink-0 items-center gap-1 px-3">
         <Face
           active={showing === "pulse"}
           onClick={() => onFace("pulse")}
@@ -248,6 +268,10 @@ export const ContextColumn = memo(function ContextColumn({
               onStage={onStage}
               onBranch={onBranch}
               onSuggestMessage={onSuggestMessage}
+              onSetRemote={onSetRemote}
+              onPush={onPush}
+              onAutoPush={onAutoPush}
+              canPush={canPush}
             />
           ) : showing === "code" && activeFileData ? (
             <DiffViewer
@@ -272,10 +296,12 @@ export const ContextColumn = memo(function ContextColumn({
               connected={connected}
               iterations={iterations}
               usage={usage}
+              usageHistory={usageHistory}
               changed={changed}
               activeFile={activeFile}
               tree={tree}
               treeRoot={treeRoot}
+              sandboxIdle={sandboxIdle}
               flash={flash}
               modelName={modelName}
               routingMode={routingMode}
@@ -293,10 +319,12 @@ export const ContextColumn = memo(function ContextColumn({
 
       <TerminalPanel
         lines={terminal}
-        busy={terminalBusy}
+        busy={terminalBusy || terminalCommandRunning}
         open={terminalOpen}
         onToggle={onToggleTerminal}
         onClear={onClearTerminal}
+        onRun={onRunCommand}
+        running={terminalCommandRunning}
       />
     </div>
   );
@@ -339,7 +367,7 @@ function Face({
         "transition-colors duration-200",
         mono ? "voice-machine" : "font-sans text-xs font-medium",
         disabled
-          ? "cursor-not-allowed text-ink-dim"
+          ? "cursor-not-allowed text-ink-subtle"
           : active
             ? "text-ink"
             : "text-ink-faint hover:text-ink-muted",

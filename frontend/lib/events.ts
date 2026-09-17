@@ -111,6 +111,42 @@ export type ServerEvent =
       status: GitChange[];
       log: GitCommit[];
       path: string;
+      /** URL of `origin`, or null when no remote has been set. */
+      remote: string | null;
+      /** Whether this repository commits and pushes at the end of every turn. */
+      auto_push: boolean;
+    }
+  /**
+   * A command the user typed into the terminal panel, not one the agent ran.
+   * Its output arrives as `tool_output_chunk` frames with the same `call_id`;
+   * these two frames bracket it and keep it out of the transcript.
+   */
+  | { type: "terminal_started"; ts: number; call_id: string; command: string }
+  | {
+      type: "terminal_exit";
+      ts: number;
+      call_id: string;
+      exit_code: number;
+      timed_out: boolean;
+    }
+  /**
+   * The end-of-turn auto commit of an opted-in Code repository — the turn
+   * summary. `sha` is empty when the commit itself failed, and then `error`
+   * says why; `pushed: false` with a `sha` means the commit landed and the
+   * push did not.
+   */
+  | {
+      type: "turn_commit";
+      ts: number;
+      sha: string;
+      short: string;
+      subject: string;
+      branch: string;
+      /** Absolute sandbox paths, so the tree can open to them. */
+      files: string[];
+      pushed: boolean;
+      remote: string | null;
+      error: string;
     }
   | {
       type: "preview_ready";
@@ -325,6 +361,12 @@ export type ClientEvent =
   /** Make a stored branch the live conversation again. */
   | { type: "switch_branch"; turn_index: number; version: number }
   | { type: "ping" }
+  /**
+   * A shell command typed into the Code section's terminal panel. Runs in
+   * the session's sandbox and streams back as terminal frames. One at a
+   * time: a second command while one is running is refused, not queued.
+   */
+  | { type: "terminal_command"; command: string }
   /**
    * Answers a paused run. Agents section only. `parameters` is read for
    * "edited" and only the keys present are applied, so a card that exposes

@@ -216,14 +216,18 @@ def main() -> int:
     print(f"  {len(after)} model calls · ${cost_after:.4f} · "
           f"{cost_after / max(settings.credit_usd, 1e-9):.1f} credits' worth")
 
-    debits = [l for l in ledger if float(l.get("amount") or 0) < 0]
-    grants = [l for l in ledger if float(l.get("amount") or 0) > 0]
-    debited = -sum(float(l.get("amount") or 0) for l in debits)
+    debits = [row for row in ledger if float(row.get("amount") or 0) < 0]
+    grants = [row for row in ledger if float(row.get("amount") or 0) > 0]
+    debited = -sum(float(row.get("amount") or 0) for row in debits)
     print(f"  Ledger over the same period: {len(debits)} debits totalling "
           f"{debited:.1f} credits, {len(grants)} grants")
 
-    llm_debits = -sum(float(l.get("amount") or 0) for l in debits if l.get("kind") == "llm")
-    tool_debits = -sum(float(l.get("amount") or 0) for l in debits if l.get("kind") == "tool")
+    llm_debits = -sum(
+        float(row.get("amount") or 0) for row in debits if row.get("kind") == "llm"
+    )
+    tool_debits = -sum(
+        float(row.get("amount") or 0) for row in debits if row.get("kind") == "tool"
+    )
     print(f"    of which {llm_debits:.1f} credits LLM, {tool_debits:.1f} credits tool surcharge")
 
     # Tool surcharges have no token_usage counterpart, so this only reconciles

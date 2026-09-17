@@ -1,0 +1,58 @@
+# Lint both halves of the repo on every push and pull request.
+#
+# The frontend has had ESLint and `tsc --noEmit` runnable locally for a while
+# and the backend had no linter at all, so nothing enforced either. Two things
+# shipped through that gap: an unused import and a file with no trailing
+# newline on the Python side, and — found by ruff's first run — an exception
+# caught in `api/rest.py` that was never imported, which turned the
+# out-of-credit 402 path into a NameError.
+#
+# The two jobs are separate so a Python failure does not hide a TypeScript one,
+# or the reverse. Neither installs the other's toolchain.
+
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: backend (ruff)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Only the dev tools, not `requirements.txt`. Linting does not need e2b,
+      # supabase or tiktoken installed, and pulling the full dependency set to
+      # run a static check would multiply this job's time for nothing. The
+      # version comes from the pinned dev file rather than being repeated
+      # here, so CI, a developer's venv and the sandbox image (which pins the
+      # same version in sandbox/e2b.Dockerfile) cannot drift apart.
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check app scripts
+
+  frontend:
+    name: frontend (eslint + tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      # Type errors are the half ESLint does not see, and this project's
+      # frontend is TypeScript throughout.
+      - run: npm run typecheck

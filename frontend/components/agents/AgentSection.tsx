@@ -45,10 +45,21 @@ export function AgentSection({
   token,
   config,
   models,
+  jumpTo = null,
+  onJumpConsumed,
 }: {
   token?: string | null;
   config: BackendConfig | null;
   models: ModelOption[];
+  /**
+   * A specific conversation to open, named from outside — the page's
+   * cross-surface search, which can turn up an Agents session while the user
+   * is somewhere else entirely. Consumed once and then cleared, the same
+   * contract a handoff's seed prompt has: it is an instruction that has been
+   * carried out, not a state this section should keep mirroring.
+   */
+  jumpTo?: { agentId: string; sessionId: string } | null;
+  onJumpConsumed?: () => void;
 }) {
   const [catalogue, setCatalogue] = useState<AgentSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -172,6 +183,18 @@ export function AgentSection({
     }
     setShelfOpen(false);
   }, [activeAgent, token]);
+
+  // Open what the page asked for. Written straight into this agent's slot
+  // rather than through `openAgent`, which would reuse whatever session that
+  // specialist already had open and quietly ignore the one actually chosen.
+  useEffect(() => {
+    if (!jumpTo) return;
+    setActiveAgent(jumpTo.agentId);
+    writeLive(AGENT_ACTIVE_KEY, jumpTo.agentId);
+    setSessions((s) => ({ ...s, [jumpTo.agentId]: jumpTo.sessionId }));
+    setShelfOpen(false);
+    onJumpConsumed?.();
+  }, [jumpTo, onJumpConsumed]);
 
   const refreshShelf = useCallback(() => {
     if (!activeAgent) {

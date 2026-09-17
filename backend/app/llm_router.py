@@ -59,6 +59,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, AsyncIterator, Literal
@@ -1387,6 +1388,17 @@ EMPTY_TURN_TEXT = (
     "it spent its output budget on reasoning — try asking again.)"
 )
 
+#: Key holding a tool call's *unparsed* argument string when it was not valid
+#: JSON. A model that runs out of output budget mid-argument stops in the
+#: middle of the string, so this is overwhelmingly a truncation marker rather
+#: than a malformed-model marker. It replaces the arguments entirely: a call
+#: carrying it has no usable arguments at all and must not be dispatched — see
+#: `agent.graph._broken_arguments`, which turns it into a `tool_result` error
+#: the model can act on. Writing the fragment into the block rather than
+#: discarding it is deliberate: the length is what tells the model it was cut
+#: off rather than rejected.
+RAW_ARGUMENTS_KEY = "_raw_arguments"
+
 
 def _openai_blocks(
     content: str | None,
@@ -1411,7 +1423,7 @@ def _openai_blocks(
         try:
             args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
         except Exception:  # noqa: BLE001
-            args = {"_raw_arguments": raw_args}
+            args = {RAW_ARGUMENTS_KEY: raw_args}
         blocks.append(
             {
                 "type": "tool_use",
@@ -1987,6 +1999,42 @@ def _should_fall_back(exc: BaseException) -> tuple[bool, int | None, str]:
     return classify_failure(exc)
 
 
+#: OpenRouter's 402 names the ceiling the account can currently pay for:
+#: "You requested up to 8000 tokens, but can only afford 5870".
+_AFFORDABLE = re.compile(r"can only afford\s+(\d+)", re.I)
+
+
+def affordable_max_tokens(exc: BaseException) -> int | None:
+    """The ceiling a 402 says this account can pay for, if it named one.
+
+    OpenRouter prices a request by its `max_tokens` *ceiling* rather than by
+    what it produces, and refuses outright once the balance cannot cover that
+    ceiling. The refusal is not about the conversation and not about the
+    model's own limits — it is arithmetic against a balance that moves — and
+    it comes with the answer already worked out, so there is no need to guess.
+
+    Worth using rather than falling straight to another model, because the
+    ceiling is shared across a provider while affordability is per-token-price:
+    `openrouter_max_tokens` at 8000 is comfortable for `llama-4-scout` and
+    unaffordable for `nemotron-3-ultra-550b`, which is 550B parameters and
+    priced to match. The result was a model listed as available that answered
+    402 to *everything* — "reply with PONG" included — and was silently
+    swapped out on every use. Retrying it at the ceiling it can afford is the
+    difference between a model that works and a model that is only ever a
+    toast about a different model.
+    """
+    match = _AFFORDABLE.search(str(exc))
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except ValueError:  # pragma: no cover - the group is \d+
+        return None
+    # A floor, because a ceiling of ~nothing is not worth an attempt: it would
+    # buy a truncated answer and a second failure.
+    return value if value >= 256 else None
+
+
 def _log_fallback(notice: FallbackNotice, *, section: str = "") -> None:
     """One line per fallback, structured enough to aggregate later.
 
@@ -2052,6 +2100,10 @@ async def stream_with_fallback(
     tried: list[str] = []
     current = model_id
     attempt = 0
+    # Models already retried at the ceiling a 402 said they could afford, so
+    # one refusal buys one reduced attempt and never a loop.
+    trimmed: set[str] = set()
+    ceiling = max_tokens
 
     while True:
         tried.append(current)
@@ -2063,7 +2115,7 @@ async def stream_with_fallback(
                 tools=tools,
                 system=system,
                 stream=True,
-                max_tokens=max_tokens,
+                max_tokens=ceiling,
             ):
                 # Anything the user can see, or the final message, commits us
                 # to this model. `thinking_*` counts: it is rendered live.
@@ -2086,6 +2138,24 @@ async def stream_with_fallback(
                 raise
             if not retryable or attempt >= MAX_FALLBACK_ATTEMPTS:
                 raise
+            # A 402 that named an affordable ceiling is answerable by this
+            # model, just not at this price. Retry it here rather than moving
+            # on: switching models is the remedy for a model that cannot
+            # answer, and this one can. Costs no fallback attempt, because it
+            # is not one — the same model is being asked the same question.
+            afford = affordable_max_tokens(exc)
+            if status == 402 and afford and current not in trimmed:
+                trimmed.add(current)
+                log.warning(
+                    "llm_budget_trim model=%s max_tokens=%s -> %s section=%s",
+                    current,
+                    ceiling,
+                    afford,
+                    section,
+                )
+                ceiling = afford
+                tried.pop()
+                continue
             nxt = _next_candidate(current, tried)
             if nxt is None:
                 raise
@@ -2102,6 +2172,12 @@ async def stream_with_fallback(
             _log_fallback(notice, section=section)
             await _announce(on_fallback, notice)
             current = nxt
+            # Back to the configured ceiling. A trim is a fact about one
+            # model's price against the balance, not about the request, and
+            # carrying it onto a cheaper model would hand the model that
+            # *can* afford the work a smaller budget than it was given —
+            # which is how a `file_write` gets truncated mid-argument.
+            ceiling = max_tokens
 
 
 async def complete_with_fallback(
@@ -2127,6 +2203,8 @@ async def complete_with_fallback(
     tried: list[str] = []
     current = model_id
     attempt = 0
+    trimmed: set[str] = set()
+    ceiling = max_tokens
 
     while True:
         tried.append(current)
@@ -2137,7 +2215,7 @@ async def complete_with_fallback(
                 tools=tools,
                 system=system,
                 stream=False,
-                max_tokens=max_tokens,
+                max_tokens=ceiling,
             )
             return message, current
         except asyncio.CancelledError:
@@ -2146,6 +2224,21 @@ async def complete_with_fallback(
             retryable, status, kind = _should_fall_back(exc)
             if not retryable or attempt >= MAX_FALLBACK_ATTEMPTS:
                 raise
+            # Same reduced-ceiling retry as the streaming path; see
+            # `affordable_max_tokens`.
+            afford = affordable_max_tokens(exc)
+            if status == 402 and afford and current not in trimmed:
+                trimmed.add(current)
+                log.warning(
+                    "llm_budget_trim model=%s max_tokens=%s -> %s section=%s",
+                    current,
+                    ceiling,
+                    afford,
+                    section,
+                )
+                ceiling = afford
+                tried.pop()
+                continue
             nxt = _next_candidate(current, tried)
             if nxt is None:
                 raise
@@ -2161,3 +2254,9 @@ async def complete_with_fallback(
             _log_fallback(notice, section=section)
             await _announce(on_fallback, notice)
             current = nxt
+            # Back to the configured ceiling. A trim is a fact about one
+            # model's price against the balance, not about the request, and
+            # carrying it onto a cheaper model would hand the model that
+            # *can* afford the work a smaller budget than it was given —
+            # which is how a `file_write` gets truncated mid-argument.
+            ceiling = max_tokens

@@ -146,7 +146,7 @@ export function ApprovalCard({
                     />
                   ) : (
                     <span className="voice-machine block whitespace-pre-wrap break-words text-ink/85">
-                      {stringify(value) || <em className="text-ink-dim">(empty)</em>}
+                      {stringify(value) || <em className="text-ink-subtle">(empty)</em>}
                     </span>
                   )}
                 </dd>
@@ -191,7 +191,7 @@ export function ApprovalCard({
                 onClick={() => send(editing && dirty ? "edited" : "approved")}
                 disabled={Boolean(sent)}
                 className="h-8 rounded-ctl bg-gradient-to-br from-accent to-accent-alt px-3.5
-                           font-sans text-2xs font-semibold text-accent-ink transition-all
+                           font-sans text-2xs font-semibold text-accent-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter]
                            duration-200 hover:brightness-110 active:scale-[0.97]
                            disabled:pointer-events-none disabled:opacity-50"
               >
@@ -238,7 +238,7 @@ export function ApprovalCard({
               </ul>
             )}
 
-            <p className="mt-2 font-sans text-2xs text-ink-dim">
+            <p className="mt-2 font-sans text-2xs text-ink-subtle">
               Nothing happens on its own. If this is left unanswered for{" "}
               {Math.round(item.timeoutSeconds / 60)} minutes it is refused, not
               approved.

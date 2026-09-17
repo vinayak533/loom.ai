@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import { FileText, Plus, Trash2, TriangleAlert, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/cn";
+import { useFocusTrap } from "@/lib/useFocusTrap";
 import type { ProjectDetail, ProjectFile } from "@/lib/projects";
 import {
   deleteProjectFile,
@@ -42,6 +43,9 @@ export function ProjectPanel({
   onOpenSession: (sessionId: string) => void;
 }) {
   const motionOK = useMotionOK();
+  const dialog = useRef<HTMLElement>(null);
+  // Mounted only while open, so the trap is simply always on.
+  useFocusTrap(dialog, true);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -117,6 +121,7 @@ export function ProjectPanel({
       />
 
       <motion.section
+        ref={dialog}
         role="dialog"
         aria-modal="true"
         aria-label={project?.name ?? "Project"}

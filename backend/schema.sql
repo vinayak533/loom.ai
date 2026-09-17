@@ -181,8 +181,28 @@ create table if not exists public.credit_ledger (
   model_id    text,
   created_at  timestamptz not null default now()
 );
+-- Whether the balance columns on `user_credits` already reflect this row.
+--
+-- The two halves of a movement are two round trips and cannot be one. The
+-- ledger row is written first and the balance second, so a crash between them
+-- leaves a row that says `false` — a movement recorded but not yet reflected —
+-- rather than a balance moved with nothing to explain it. `scripts/reconcile_credits.py`
+-- reports those, and recomputes each account from the ledger, which is the
+-- authority.
+--
+-- Defaults to true so every row written before this column existed reads as
+-- what it is: already applied.
+alter table public.credit_ledger
+  add column if not exists balance_applied boolean not null default true;
+
 create index if not exists credit_ledger_user_idx
   on public.credit_ledger (user_id, created_at desc);
+
+-- Partial, because the interesting rows are the rare ones: reconciliation
+-- wants the unapplied movements and nothing else, and a full index over a
+-- column that is true for essentially every row would not be used.
+create index if not exists credit_ledger_unapplied_idx
+  on public.credit_ledger (user_id) where not balance_applied;
 create index if not exists credit_ledger_agent_idx
   on public.credit_ledger (agent_id, created_at desc);
 

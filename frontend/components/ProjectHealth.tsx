@@ -257,7 +257,7 @@ function Stat({
           tone === "warn" && "text-warn",
           tone === "plain" && "text-ink-muted",
         )}
-        title={value}
+        data-tip={value}
       >
         {value}
       </dd>

@@ -2,6 +2,7 @@
 
 import { memo } from "react";
 import { cn } from "@/lib/cn";
+import { Meter } from "../Meter";
 import {
   courseHues,
   duration,
@@ -119,19 +120,13 @@ export function CoursePage({
                   {progress.completed_count}/{progress.chapter_count} · {progress.percent}%
                 </span>
               </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-black/40">
-                <div
-                  className="h-full rounded-full bg-gradient-to-r from-accent to-accent-alt
-                             transition-[width] duration-300 ease-out"
-                  style={{ width: `${progress.percent}%` }}
-                />
-              </div>
+              <Meter value={progress.percent} label="Your progress" />
               <button
                 type="button"
                 onClick={() => onOpenChapter(nextId)}
                 className="mt-3.5 flex h-9 items-center gap-1.5 rounded-ctl bg-gradient-to-br
                            from-accent to-accent-alt px-4 text-[0.8125rem] font-semibold
-                           text-accent-ink transition-all duration-200 hover:brightness-110
+                           text-accent-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:brightness-110
                            active:scale-[0.98]"
               >
                 {progress.completed
@@ -254,7 +249,7 @@ const ChapterRowItem = memo(function ChapterRowItem({
         <span className="mt-0.5 block text-[0.8125rem] leading-relaxed text-ink-faint">
           {chapter.summary}
         </span>
-        <span className="voice-machine mt-1 flex items-center gap-2 text-ink-dim">
+        <span className="voice-machine mt-1 flex items-center gap-2 text-ink-subtle">
           <span>{chapter.minutes} min</span>
           {chapter.has_video && <span>· video</span>}
           {chapter.resource_count > 0 && <span>· {chapter.resource_count} resources</span>}
@@ -282,7 +277,7 @@ function ExamRow({
       <span
         className={cn(
           "grid h-6 w-6 shrink-0 place-items-center rounded-full border text-[0.6875rem]",
-          locked ? "border-line text-ink-dim" : "border-accent-alt text-accent-alt",
+          locked ? "border-line text-ink-subtle" : "border-accent-alt text-accent-alt",
         )}
         aria-hidden
       >
@@ -298,7 +293,7 @@ function ExamRow({
         >
           {exam.title}
         </p>
-        <p className="voice-machine mt-0.5 text-ink-dim">
+        <p className="voice-machine mt-0.5 text-ink-subtle">
           {locked
             ? `Complete ${exam.remaining_chapter_ids.length} more chapter${
                 exam.remaining_chapter_ids.length === 1 ? "" : "s"
@@ -327,9 +322,9 @@ function ExamRow({
         disabled={locked}
         onClick={() => onOpen(exam.id)}
         className={cn(
-          "h-8 touch:h-11 shrink-0 rounded-ctl px-3.5 text-[0.8125rem] font-semibold transition-all duration-200",
+          "h-8 touch:h-11 shrink-0 rounded-ctl px-3.5 text-[0.8125rem] font-semibold transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
           locked
-            ? "cursor-not-allowed border border-line text-ink-dim"
+            ? "cursor-not-allowed border border-line text-ink-subtle"
             : "bg-accent-alt text-accent-ink hover:brightness-110 active:scale-[0.98]",
         )}
       >

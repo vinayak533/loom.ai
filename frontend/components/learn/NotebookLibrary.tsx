@@ -228,7 +228,7 @@ export function NotebookLibrary({
               type="button"
               onClick={onCreate}
               className="ml-1 flex h-9 items-center gap-1.5 rounded-ctl bg-gradient-to-br from-accent to-accent-alt
-                         px-3.5 text-[0.8125rem] font-semibold text-accent-ink transition-all duration-200
+                         px-3.5 text-[0.8125rem] font-semibold text-accent-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200
                          hover:brightness-110 active:scale-[0.97]"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
@@ -344,7 +344,7 @@ function NotebookCard({
         onClick={() => onOpen(notebook.id)}
         className={cn(
           "block w-full overflow-hidden rounded-card border border-line bg-elevated text-left",
-          "transition-all duration-250 ease-out hover:border-accent-line hover:bg-raised",
+          "transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-250 ease-out hover:border-accent-line hover:bg-raised",
           "hover:shadow-lift active:scale-[0.995]",
           grid ? "" : "flex items-center gap-3.5 p-2.5",
         )}
@@ -479,7 +479,7 @@ function IconButton({
       type="button"
       onClick={onClick}
       aria-label={label}
-      title={label}
+      data-tip={label}
       className={cn(
         "grid h-8 w-8 shrink-0 place-items-center rounded-ctl transition-colors duration-200",
         active ? "bg-raised text-ink" : "text-ink-faint hover:bg-elevated hover:text-ink",
@@ -507,7 +507,7 @@ function ViewToggle({
       onClick={onClick}
       aria-label={label}
       aria-pressed={on}
-      title={label}
+      data-tip={label}
       className={cn(
         "grid h-7 w-7 place-items-center rounded-[calc(var(--r-ctl)-2px)] transition-colors duration-200",
         on ? "bg-raised text-ink" : "text-ink-faint hover:text-ink-muted",
@@ -549,7 +549,7 @@ function EmptyState({
           type="button"
           onClick={action.onClick}
           className="mt-4 rounded-ctl border border-line bg-elevated px-3.5 py-2 text-[0.8125rem]
-                     font-medium text-ink transition-all duration-200 hover:border-accent-line
+                     font-medium text-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:border-accent-line
                      hover:bg-raised active:scale-[0.98]"
         >
           {action.label}

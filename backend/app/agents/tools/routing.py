@@ -396,6 +396,13 @@ def _dotted(data: Any, path: str) -> Any:
     return current
 
 
+#: The keys that make an object a rule. A rule needs at least one of them;
+#: an object with none is malformed input, not a rule that happened not to
+#: match. `default` is in the set because a fallback rule is legitimately just
+#: `{"default": true, "outcome": ...}` with no field or operator of its own.
+_RULE_KEYS = {"field", "operator", "value", "outcome", "default"}
+
+
 async def evaluate_conditions(ctx: ToolContext, args: dict) -> ToolResult:
     data = _maybe_parse(args.get("data"))
     if isinstance(data, _ParseError):
@@ -414,11 +421,38 @@ async def evaluate_conditions(ctx: ToolContext, args: dict) -> ToolResult:
     trace: list[dict[str, Any]] = []
     outcome: Any = None
     matched_index: int | None = None
+    #: How many rules were well-formed enough to actually compare something.
+    #: A run where this stays zero produced no boolean logic at all, and must
+    #: not be reported as though it had — see the end of this function.
+    evaluated = 0
 
     for index, rule in enumerate(rules):
         if not isinstance(rule, dict):
             trace.append({"rule": index, "error": "rule is not an object"})
             continue
+
+        # A dict carrying none of the keys a rule is made of is not a rule that
+        # failed to match — it is not a rule. Every getter below has a default
+        # (`field=""`, `operator="equals"`, `value=None`), so such an object
+        # used to evaluate cleanly against the whole payload, come out False,
+        # and take its place in the trace looking exactly like a legitimate
+        # non-match. That is a silent false negative from a tool whose entire
+        # promise is that it does real boolean logic rather than reasoning, and
+        # the caller had no way to tell the two apart.
+        if not _RULE_KEYS & set(rule):
+            trace.append(
+                {
+                    "rule": index,
+                    "error": (
+                        "not a rule: expected an object with `field`, "
+                        "`operator`, `value` and `outcome` (or `default`: true "
+                        "with an `outcome`)"
+                    ),
+                    "got_keys": sorted(str(k) for k in rule),
+                }
+            )
+            continue
+
         field = str(rule.get("field") or "")
         operator = str(rule.get("operator") or "equals")
         expected = rule.get("value")
@@ -441,6 +475,7 @@ async def evaluate_conditions(ctx: ToolContext, args: dict) -> ToolResult:
             trace.append({"rule": index, "error": f"{type(exc).__name__}: {exc}"})
             continue
 
+        evaluated += 1
         trace.append(
             {
                 "rule": index,
@@ -470,14 +505,43 @@ async def evaluate_conditions(ctx: ToolContext, args: dict) -> ToolResult:
         "outcome": outcome,
         "matched_rule": matched_index,
         "matched": matched_index is not None,
+        "rules_evaluated": evaluated,
+        "rules_given": len(rules),
         "trace": trace,
         "note": "First matching rule wins; rules are evaluated in order.",
     }
+
+    # Nothing was evaluable, so there is no "no rule matched" to report — that
+    # sentence claims a comparison happened and came out false. It is a tool
+    # error, and it says what a rule should look like, because the caller is a
+    # model that can fix its own input and will otherwise take the false
+    # negative at face value and route on it.
+    if evaluated == 0:
+        return ToolResult(
+            output=(
+                f"Error: none of the {len(rules)} rule(s) could be evaluated, "
+                "so no condition was tested. This is not a non-match.\n\n"
+                "Each rule must be an object shaped "
+                '`{"field": "a.b", "operator": "equals", "value": <any>, '
+                '"outcome": <any>}` — or `{"default": true, "outcome": <any>}` '
+                "for the fallback. The trace says what each rule was rejected "
+                f"for.\n\n{as_json(payload)}"
+            ),
+            success=False,
+            meta=payload,
+        )
+
     headline = (
         f"Rule {matched_index} matched → {outcome!r}"
         if matched_index is not None
         else f"No rule matched → {outcome!r}"
     )
+    if evaluated < len(rules):
+        # A partial run is still a real answer, but the model must not read
+        # "no rule matched" as "every rule you sent was tested".
+        headline += (
+            f" ({evaluated} of {len(rules)} rules were evaluable — see the trace)"
+        )
     return ToolResult(output=f"{headline}\n\n{as_json(payload)}", meta=payload)
 
 

@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { SessionRow } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { SkeletonRows } from "./Skeleton";
 import { TOUCH_QUERY, useMediaQuery } from "@/lib/useMediaQuery";
 import { SPRING_SNAP, useMotionOK } from "./Anim";
 import { ProjectStrip } from "./projects/ProjectStrip";
@@ -34,6 +35,7 @@ export type ShelfView = "active" | "archived";
  */
 export const SessionSidebar = memo(function SessionSidebar({
   sessions,
+  loading = false,
   activeId,
   view,
   onView,
@@ -49,6 +51,8 @@ export const SessionSidebar = memo(function SessionSidebar({
   onMoveToProject,
 }: {
   sessions: SessionRow[];
+  /** True until the first list has answered; draws a shaped placeholder. */
+  loading?: boolean;
   activeId: string | null;
   view: ShelfView;
   onView: (view: ShelfView) => void;
@@ -84,7 +88,7 @@ export const SessionSidebar = memo(function SessionSidebar({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex h-12 shrink-0 items-center gap-2 px-4">
+      <header className="flex h-bar-sub shrink-0 items-center gap-2 px-3.5">
         <span className="sigil h-2 w-2 bg-accent" aria-hidden />
         <h2 className="voice-label text-ink-muted">Sessions</h2>
         {onClose && (
@@ -115,7 +119,7 @@ export const SessionSidebar = memo(function SessionSidebar({
           type="button"
           onClick={onNewSession}
           className="flex h-9 w-full items-center justify-center gap-2 rounded-ctl border border-line
-                     bg-elevated text-[0.8125rem] font-medium text-ink transition-all duration-200
+                     bg-elevated text-[0.8125rem] font-medium text-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200
                      hover:border-accent-line hover:bg-raised active:scale-[0.985]"
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-accent">
@@ -158,7 +162,9 @@ export const SessionSidebar = memo(function SessionSidebar({
         />
       ) : (
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-1.5 pb-3">
-        {sessions.length === 0 ? (
+        {loading && sessions.length === 0 ? (
+          <SkeletonRows rows={6} className="pt-1" />
+        ) : sessions.length === 0 ? (
           <p className="px-3 py-2 text-xs leading-relaxed text-ink-faint">
             {/* A project filter has its own empty state. Falling through to
                 the Supabase notice below tells the user their database is

@@ -98,7 +98,7 @@ export function CodeBlock({
         {/* Only worth saying when the number is actually informative — on a
             four-line snippet it is noise sitting next to the thing it counts. */}
         {lines > 6 && (
-          <span className="voice-machine ml-auto hidden select-none text-ink-dim sm:inline">
+          <span className="voice-machine ml-auto hidden select-none text-ink-subtle sm:inline">
             {lines} lines
           </span>
         )}
@@ -107,7 +107,7 @@ export function CodeBlock({
           onClick={copy}
           aria-label={copied ? "Copied" : "Copy code"}
           className={cn(
-            "flex items-center gap-1.5 rounded-[6px] px-1.5 py-1 font-sans text-[0.625rem]",
+            "flex items-center gap-1.5 rounded-[6px] px-1.5 py-1 font-sans text-2xs",
             "text-ink-faint transition-colors duration-200",
             "hover:bg-white/[0.06] hover:text-ink",
             lines > 6 ? "ml-1" : "ml-auto",

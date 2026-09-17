@@ -63,7 +63,7 @@ function ActionButton({
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
-      title={label}
+      data-tip={label}
       className={cn(
         "grid h-7 w-7 place-items-center rounded-md transition-colors duration-150",
         "touch:h-9 touch:w-9",
@@ -348,10 +348,10 @@ export function MessageEditor({
           onClick={save}
           disabled={!draft.trim()}
           className={cn(
-            "h-8 rounded-ctl px-3 text-xs font-medium transition-all duration-200",
+            "h-8 rounded-ctl px-3 text-xs font-medium transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
             draft.trim()
               ? "bg-gradient-to-br from-accent to-accent-alt text-accent-ink hover:brightness-110"
-              : "cursor-not-allowed bg-raised text-ink-dim opacity-55",
+              : "cursor-not-allowed bg-raised text-ink-subtle opacity-55",
           )}
         >
           Save & submit

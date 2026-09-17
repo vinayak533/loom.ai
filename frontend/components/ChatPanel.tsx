@@ -555,7 +555,7 @@ export function ChatPanel({
             that makes an interface feel assembled rather than designed. */}
         {empty && (
           <div className={cn("mx-auto w-full px-6 pb-7 sm:px-8", measure)}>
-            <h1 className="text-display font-semibold text-ink">
+            <h1 className="max-w-[34ch] text-display font-semibold text-ink">
               {greeting()},{" "}
               <span className="bg-gradient-to-br from-accent to-accent-alt bg-clip-text text-transparent">
                 {userName}
@@ -758,11 +758,11 @@ export function ChatPanel({
                     disabled={!armed || !state.connected}
                     aria-label="Send message"
                     className={cn(
-                      "ml-2 grid h-[34px] w-[34px] place-items-center rounded-ctl transition-all duration-200",
+                      "ml-2 grid h-[34px] w-[34px] place-items-center rounded-ctl transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
                       "touch:h-11 touch:w-11",
                       armed && state.connected
                         ? "bg-gradient-to-br from-accent to-accent-alt text-accent-ink hover:brightness-110 active:scale-[0.92]"
-                        : "cursor-not-allowed bg-raised text-ink-dim opacity-55",
+                        : "cursor-not-allowed bg-raised text-ink-subtle opacity-55",
                     )}
                   >
                     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round">
@@ -974,6 +974,23 @@ function Item({
         </TraceRow>
       );
 
+    case "commit":
+      // The end-of-turn auto commit: the turn's summary, on the thread where
+      // the turn happened, so what was recorded and where it went is read in
+      // the same place as the work that produced it.
+      return (
+        <TraceRow
+          kind="tool"
+          tool="git"
+          status="ok"
+          first={first}
+          last={last}
+          extending={extending}
+        >
+          <CommitCard item={item} />
+        </TraceRow>
+      );
+
     case "notice":
       // Only warnings and errors reach the thread. Model switches — the
       // auto-router's voice included — are session facts rather than steps,
@@ -999,6 +1016,38 @@ function Item({
         </TraceRow>
       );
   }
+}
+
+/**
+ * What the turn committed, and whether it reached the remote.
+ *
+ * The hash and the subject are the two things a person checks against
+ * `git log` on the other end, so they lead. The push line is where a failure
+ * shows: a commit that landed but did not push is the state most worth
+ * noticing, and it is amber rather than red because the work is safe — it
+ * is recorded locally and the next successful push carries it.
+ */
+function CommitCard({ item }: { item: Extract<ChatItem, { kind: "commit" }> }) {
+  const count = item.files.length;
+  return (
+    <div className="rounded-ctl border border-line bg-raised px-3.5 py-2.5 font-sans text-[0.8125rem] shadow-e1">
+      <p className="flex flex-wrap items-baseline gap-x-2">
+        <span className="text-ink-faint">Committed</span>
+        <span className="font-mono text-xs text-accent">{item.short}</span>
+        <span className="text-ink-faint">on</span>
+        <span className="font-mono text-xs text-ink">{item.branch}</span>
+        <span className="text-ink-faint">
+          · {count} file{count === 1 ? "" : "s"}
+        </span>
+      </p>
+      <p className="mt-1 text-ink">{item.subject}</p>
+      <p className={cn("mt-1 text-xs", item.pushed ? "text-ink-muted" : "text-warn")}>
+        {item.pushed
+          ? `Pushed to ${(item.remote ?? "").replace(/^https:\/\//, "")}`
+          : item.error || "Not pushed."}
+      </p>
+    </div>
+  );
 }
 
 function AssistantBody({

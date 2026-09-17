@@ -12,12 +12,24 @@ import asyncio
 import sys
 import uuid
 
-from dotenv import load_dotenv
+# The event renderer below prints U+2248 and a handful of box-drawing
+# characters. On a Windows console that still defaults to cp1252 those raise
+# `UnicodeEncodeError` mid-run — the loop having worked perfectly — so the
+# script dies on its own output. Every sibling script in this directory does
+# this; this one did not.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:  # pragma: no cover - not a real stream
+        pass
+
+from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
 from app.agent import runner  # noqa: E402
 from app.config import get_settings  # noqa: E402
+from app.db import repository  # noqa: E402
 from app.emitter import Emitter, registry  # noqa: E402
 from app.tools.sandbox import sandbox_manager  # noqa: E402
 
@@ -94,6 +106,15 @@ async def main() -> int:
 
     await runner.startup()
     sandbox_manager.start_reaper()
+
+    # The session row first. `messages` and `token_usage` both carry a foreign
+    # key to it, so without it every write the run makes fails that constraint
+    # — which `repository.fire` logs and swallows, so the run still *works* and
+    # simply buries its own output under a wall of FK tracebacks. Nothing was
+    # wrong with the loop; the harness had just never created the row.
+    await repository.create_session(
+        session_id, None, title="Agent loop smoke test", section="code"
+    )
 
     emitter = Emitter()
     registry.register(emitter)

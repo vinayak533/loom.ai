@@ -59,7 +59,7 @@ function ImageArtifact({
       <button
         type="button"
         onClick={() => setZoomed((z) => !z)}
-        className="block w-full bg-[#0b0b0d]"
+        className="block w-full bg-surface-solid"
         aria-label={zoomed ? "Shrink the image" : "Show the image at full size"}
       >
         {/* A data URI from our own backend, so `next/image` would add a
@@ -69,7 +69,7 @@ function ImageArtifact({
           src={artifact.data_url}
           alt={artifact.prompt ?? "Generated image"}
           className={cn(
-            "mx-auto block transition-all duration-300",
+            "mx-auto block transition-[max-height,width,opacity] duration-300",
             zoomed ? "max-h-none w-full" : "max-h-[26rem] w-auto object-contain",
           )}
         />
@@ -83,7 +83,7 @@ function ImageArtifact({
         )}
         {artifact.negative_prompt && (
           <p className="font-sans text-2xs leading-relaxed text-ink-faint">
-            <span className="text-ink-dim">negative:</span>{" "}
+            <span className="text-ink-subtle">negative:</span>{" "}
             {artifact.negative_prompt}
           </p>
         )}

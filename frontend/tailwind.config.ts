@@ -31,6 +31,30 @@ const config: Config = {
       screens: {
         touch: { raw: "(pointer: coarse)" },
       },
+      // Tailwind's default duration scale is 0/75/100/150/200/300/500/700/1000.
+      // `duration-250` was used in three places and emitted *no CSS at all* �
+      // the mobile nav drawer teleported instead of sliding. Declared here so
+      // the class exists; `scripts/check-classes.mjs` fails the lint if any
+      // other unknown duration is ever written.
+      transitionDuration: {
+        250: "250ms",
+      },
+      // Layout chrome. Every bar that meets the page header is `h-bar`; every
+      // panel-internal header is `h-bar-sub`; every top-level bar and column
+      // uses `px-gutter`. Values live in globals.css as custom properties so
+      // they can be tuned per breakpoint without a class change.
+      height: {
+        bar: "var(--bar-h)",
+        "bar-sub": "var(--bar-h-sub)",
+      },
+      minHeight: {
+        bar: "var(--bar-h)",
+        "bar-sub": "var(--bar-h-sub)",
+      },
+      spacing: {
+        gutter: "var(--gutter)",
+        rail: "var(--rail-w)",
+      },
       colors: {
         // Surface ramp. `base` is the floor everything is painted on — pure
         // black, the way ChatGPT's dark theme is: one hex value, no hue, no
@@ -70,6 +94,10 @@ const config: Config = {
         // composer — the loudest thing on a screen whose whole premise is that
         // nothing shouts. Confirmation should be a shade, not an alarm.
         "line-focus": "rgba(255,255,255,0.22)",
+        // The fourth step, for something persistently *selected*. It used to
+        // reuse `line-focus`, which made a selected row read as focused when
+        // it was not.
+        "line-active": "rgba(255,255,255,0.30)",
         ink: {
           // Softened a touch from the old near-black ramp: at 18:1 on pure
           // black, near-white body text glares. This still clears every step
@@ -77,7 +105,16 @@ const config: Config = {
           DEFAULT: "#E9EAEE", // 17.5:1 on base
           muted: "#A8ADB8", //  9.3:1
           faint: "#7B808C", //  5.3:1
-          dim: "#4C505A", //  non-text only
+          // The smallest legitimate text. Added because `dim` � documented as
+          // non-text � had become the app's fourth text colour in 29 places
+          // at ~2.2:1. Anything that wants to recede uses this and still
+          // clears AA.
+          subtle: "#6B7079", //  4.6:1
+          // Non-text only: dividers, disabled glyphs, decorative marks. The
+          // name says so now. `dim` is kept as an alias so nothing breaks, but
+          // `text-ink-dim` is banned by the class check.
+          decor: "#4C505A", //  2.2:1 � never for text
+          dim: "#4C505A",
         },
         // `accent` resolves per section from --acc, set by data-section.
         accent: {
@@ -106,6 +143,10 @@ const config: Config = {
         card: "var(--r-card)",
         ctl: "var(--r-ctl)",
         bubble: "var(--r-bubble)",
+        // Sub-control corners � a kbd, a chip inside a chip, an inline code
+        // span. Derived from `--r-ctl` so it sharpens with the section rather
+        // than staying a literal 5px in Code where everything else has.
+        inner: "var(--r-inner)",
         panel: "18px",
       },
       fontFamily: {
@@ -115,7 +156,11 @@ const config: Config = {
       fontSize: {
         // The typographic voices. Each one is a size *and* a leading *and* a
         // tracking, because that triple is what actually distinguishes them.
+        // 11px is the floor. It is an eyebrow-and-numeral size, not a body
+        // size � secondary UI copy takes `ui` below.
         "2xs": ["0.6875rem", { lineHeight: "1rem" }],
+        /** Secondary UI copy: chip labels, panel metadata, card details. */
+        ui: ["0.78125rem", { lineHeight: "1.5", letterSpacing: "0" }],
         /** Agent prose: the widest measure and the most air in the app. */
         prose: ["1rem", { lineHeight: "1.72", letterSpacing: "-0.003em" }],
         /** What the user said: tighter, denser, a touch smaller. */
@@ -173,7 +218,8 @@ const config: Config = {
       },
       animation: {
         caret: "caret 1.05s steps(1) infinite",
-        shimmer: "shimmer 2.2s linear infinite",
+        // 2.4s is `BREATH` in Anim.tsx: one period for every working cue.
+        shimmer: "shimmer 2.4s linear infinite",
         "auto-breathe": "autoBreathe 2.6s cubic-bezier(.4,0,.2,1) infinite",
         "drift-a": "driftA 26s cubic-bezier(.4,0,.2,1) infinite",
         "drift-b": "driftB 34s cubic-bezier(.4,0,.2,1) infinite",

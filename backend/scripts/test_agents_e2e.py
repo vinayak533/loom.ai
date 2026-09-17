@@ -8,7 +8,9 @@ Each agent gets one real prompt through the real websocket, against the real
 LLM router and the real credit meter. What is asserted per agent:
 
   * the run reaches `agent_done` without an error frame;
-  * it called at least one of its own tools (the point of a specialist);
+  * it called at least one of its own tools (the point of a specialist),
+    and — for the agents whose deliverable is an artifact rather than
+    prose — the specific tool that produces it;
   * its output honours the format its contract specifies;
   * credits were actually deducted.
 
@@ -131,7 +133,15 @@ CASES: dict[str, dict] = {
             "background, soft studio lighting, 85mm lens, minimal product shot."
         ),
         "expect_tools": {"generate_image"},
-        "check": ("names the render or says it is not configured", lambda t: len(t) > 20),
+        # Same contract, one branch wider: the deliverable is the image, and
+        # the only honest alternative is saying out loud that the tool is
+        # unconfigured. `len(t) > 20` accepted any two sentences at all.
+        "require_tools": {"generate_image"},
+        "require_tools_unless_unconfigured": True,
+        "check": (
+            "names the render, or states plainly that it is not configured",
+            lambda t: len(t) > 20,
+        ),
         "approve": True,
         "spends_money": True,
     },
@@ -155,6 +165,14 @@ CASES: dict[str, dict] = {
             '"goal": "condense for the board"}'
         ),
         "expect_tools": {"route_to_agent", "validate_json_schema", "match_patterns", "evaluate_conditions"},
+        # Agent 8's deliverable is not text — it is the handoff artifact, and
+        # only `route_to_agent` produces one. The model can and did write the
+        # same JSON directly into its reply, which reads identically and gives
+        # the user no button to press; `has_routing_directive` passed on it and
+        # so did "at least one own tool", because it had called
+        # `validate_json_schema` on the way. Named explicitly here, so a run
+        # that produces prose in place of the artifact fails.
+        "require_tools": {"route_to_agent"},
         "check": ("routing directive JSON", has_routing_directive),
     },
     "human_approval_gatekeeper": {
@@ -253,6 +271,22 @@ async def run_agent(agent_id: str, case: dict, port: int, spend: bool) -> dict:
     own_tools = set(tools_called) & set(case["expect_tools"])
     label, check = case["check"]
 
+    # Some agents' contract is an artifact, not prose. For those, "called one
+    # of its own tools" is not the assertion worth making — the specific tool
+    # that produces the artifact is. Agent 8 emitted correct routing JSON as
+    # bare text in one run in four: the check passed, and no handoff button
+    # ever appeared.
+    required = set(case.get("require_tools") or ())
+    missing_required = sorted(required - set(tools_called))
+    if (
+        missing_required
+        and case.get("require_tools_unless_unconfigured")
+        and not_configured
+    ):
+        # A tool with no API key cannot be called, and the agent saying so is
+        # the correct outcome rather than a failure to produce the artifact.
+        missing_required = []
+
     return {
         "agent": agent_id,
         "done": done,
@@ -260,6 +294,8 @@ async def run_agent(agent_id: str, case: dict, port: int, spend: bool) -> dict:
         "tools": tools_called,
         "own_tools": sorted(own_tools),
         "used_own_tool": bool(own_tools),
+        "required_tools": sorted(required),
+        "missing_required": missing_required,
         "format_label": label,
         "format_ok": bool(text) and check(text),
         "chars": len(text),
@@ -298,12 +334,25 @@ async def main() -> int:
         result = await run_agent(agent_id, case, args.port, spend=not args.no_spend)
         results.append(result)
 
-        ok = result["done"] and not result["errors"]
+        ok = (
+            result["done"]
+            and not result["errors"]
+            and not result["missing_required"]
+        )
         print(f"      done={result['done']} reason={result['reason'] or '—'} chars={result['chars']}")
         print(f"      tools: {', '.join(result['tools']) or '(none)'}")
         print(
             f"      own tools used: {'yes — ' + ', '.join(result['own_tools']) if result['used_own_tool'] else 'NO'}"
         )
+        if result["required_tools"]:
+            print(
+                f"      contract tool ({', '.join(result['required_tools'])}): "
+                + (
+                    "MISSING — " + ", ".join(result["missing_required"])
+                    if result["missing_required"]
+                    else "called"
+                )
+            )
         print(f"      format ({result['format_label']}): {'ok' if result['format_ok'] else 'FAIL'}")
         if result["not_configured"]:
             print(f"      not configured: {', '.join(result['not_configured'])}")
@@ -326,12 +375,16 @@ async def main() -> int:
     for r in results:
         run_ok = r["done"] and not r["errors"]
         charged = (r["spent"] or 0) > 0
-        row_ok = run_ok and r["used_own_tool"] and r["format_ok"] and charged
+        # An agent whose contract names a specific tool has to have called it.
+        # Folded into the `tools` column rather than given its own, because
+        # "did this agent do its job with its tools" is one question.
+        tools_ok = r["used_own_tool"] and not r["missing_required"]
+        row_ok = run_ok and tools_ok and r["format_ok"] and charged
         if not row_ok:
             failures += 1
         print(
             f"{r['agent']:30s} {'ok' if run_ok else 'FAIL':5s} "
-            f"{'ok' if r['used_own_tool'] else 'FAIL':6s} "
+            f"{'ok' if tools_ok else 'FAIL':6s} "
             f"{'ok' if r['format_ok'] else 'FAIL':7s} "
             f"{('-' + str(round(r['spent'], 2))) if charged else 'FAIL':9s}"
         )

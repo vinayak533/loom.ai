@@ -34,3 +34,11 @@ supabase>=2.10.0
 pypdf>=5.1.0            # Learn: PDF text layer -> chunks. No OCR.
 
 httpx>=0.27.0
+
+# --- Lint ---
+# ruff is NOT here. It lives in `requirements-dev.txt`, pinned, and is
+# installed by developers and by CI on top of this file — a linter is a tool
+# for the people working on the service, not a dependency of the service, and
+# keeping it out of this file is what keeps a `pip install -r requirements.txt`
+# on a server from carrying a tool the server never runs. The E2B sandbox gets
+# its own copy through `sandbox/e2b.Dockerfile`, pinned to the same version.

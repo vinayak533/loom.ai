@@ -65,7 +65,7 @@ export function SourcesPanel({
         if (e.dataTransfer.files?.length) onAdd({ kind: "pdf", files: e.dataTransfer.files });
       }}
     >
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3.5">
+      <header className="flex h-bar-sub shrink-0 items-center gap-2 border-b border-line px-3.5">
         <span className="sigil h-1.5 w-1.5 bg-accent" aria-hidden />
         <h2 className="voice-label text-ink-muted">Sources</h2>
         <span className="voice-machine ml-auto text-ink-faint">
@@ -155,7 +155,7 @@ export function SourcesPanel({
                   onClick={submit}
                   disabled={!draft.trim() || busy}
                   className="h-8 flex-1 rounded-ctl bg-accent text-2xs font-semibold text-accent-ink
-                             transition-all duration-200 hover:brightness-110 active:scale-[0.98]
+                             transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:brightness-110 active:scale-[0.98]
                              disabled:opacity-40"
                 >
                   Add source
@@ -287,7 +287,7 @@ function SourceRow({
         aria-label={`Remove ${source.title}`}
         onClick={() => onRemove(source.id)}
         className="absolute right-1.5 top-1.5 grid h-7 w-7 place-items-center rounded text-ink-faint
-                   transition-all duration-200 hover:text-del focus-visible:opacity-100
+                   transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:text-del focus-visible:opacity-100
                    [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden>
@@ -315,11 +315,11 @@ function AddButton({
       onClick={onClick}
       disabled={disabled}
       className="flex h-[52px] flex-col items-center justify-center gap-1 rounded-ctl border border-line
-                 bg-elevated text-ink-muted transition-all duration-200 hover:border-accent-line
+                 bg-elevated text-ink-muted transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:border-accent-line
                  hover:bg-raised hover:text-ink active:scale-[0.97] disabled:opacity-40"
     >
       <span className="text-accent">{icon}</span>
-      <span className="text-[0.625rem] font-medium uppercase tracking-wider">{label}</span>
+      <span className="text-2xs font-medium uppercase tracking-wider">{label}</span>
     </button>
   );
 }

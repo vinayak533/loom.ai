@@ -14,7 +14,6 @@ passed) are rolled back with it.
 
 from __future__ import annotations
 
-import os
 import sys
 import uuid
 from pathlib import Path

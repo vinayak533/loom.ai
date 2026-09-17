@@ -1,8 +1,9 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { SPRING_SOFT, useMotionOK } from "./Anim";
+import { useFocusTrap } from "@/lib/useFocusTrap";
 import { cn } from "@/lib/cn";
 import type { BackendConfig, Preferences } from "@/lib/api";
 import { AUTO_MODEL_ID, fetchPreferences, savePreferences } from "@/lib/api";
@@ -41,6 +42,8 @@ export function SettingsDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const motionOK = useMotionOK();
+  const dialog = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialog, open);
 
   /**
    * Account-level preferences.
@@ -147,6 +150,7 @@ export function SettingsDialog({
           />
 
           <motion.div
+            ref={dialog}
             role="dialog"
             aria-modal="true"
             aria-label="Settings"
@@ -156,7 +160,7 @@ export function SettingsDialog({
             transition={motionOK ? SPRING_SOFT : { duration: 0 }}
             className="glass relative w-full max-w-[30rem] rounded-card"
           >
-            <header className="flex items-center justify-between border-b border-line px-5 py-4">
+            <header className="flex h-bar items-center justify-between border-b border-line px-5">
               <h2 className="text-sm font-semibold tracking-[-0.005em] text-ink">
                 Settings
               </h2>
@@ -392,7 +396,7 @@ function Row({
           "truncate text-xs text-ink",
           mono && "font-mono text-[11px] text-ink-muted",
         )}
-        title={mono ? value : undefined}
+        data-tip={mono ? value : undefined}
       >
         {value}
       </span>

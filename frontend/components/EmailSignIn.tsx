@@ -99,7 +99,7 @@ export function EmailSignIn({
 
   const primary = cn(
     "flex w-full items-center justify-center gap-2 rounded-ctl bg-brand font-semibold",
-    "text-[#0A0E1C] transition-all duration-200 hover:brightness-110",
+    "text-[#0A0E1C] transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:brightness-110",
     "active:scale-[0.985] disabled:cursor-not-allowed disabled:opacity-55",
     roomy ? "h-11 text-sm" : "h-[38px] text-sm",
   );

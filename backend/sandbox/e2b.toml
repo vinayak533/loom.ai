@@ -1,0 +1,14 @@
+# E2B template definition for the session sandbox.
+#
+# `e2b template build` reads this file from the directory it is run in. The
+# template name is what `E2B_TEMPLATE` in backend/.env refers to; the id is
+# filled in by the CLI on first build and should be committed with it so a
+# rebuild updates the same template rather than creating a second one.
+#
+# The CLI: `npm i -g @e2b/cli` (pinned in backend/sandbox/package.json), then
+# `e2b auth login`. Docker must be running — the build happens locally and the
+# resulting image is pushed to E2B.
+template_name = "loom-sandbox"
+dockerfile = "e2b.Dockerfile"
+# Filled in by `e2b template build` on the first run. Leave blank until then.
+template_id = ""

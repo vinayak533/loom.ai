@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+
+import httpx
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,6 +30,44 @@ async def _run(fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
     except Exception:  # noqa: BLE001 - persistence is never fatal
         log.warning("Supabase call failed", exc_info=True)
+        return None
+
+
+async def _read(fn, *args, **kwargs):
+    """As :func:`_run`, but retries a transport failure once.
+
+    Reads only, and the distinction is not stylistic. `_run` answers every
+    failure with ``None``, and for a read that is the same value as "there is
+    no such row" — a collision `get_session` already documents, because a
+    caller that cannot tell them apart turns an unreachable database into a
+    404 for a session that exists. A dropped connection should not be able to
+    say that.
+
+    Observed rather than theorised: a burst of six concurrent reads failed
+    together with `httpx.ReadError: [WinError 10035]`, mid-run, during an
+    ordinary page reload. It did not reproduce under a 12-way cold burst or
+    after 75 and 150 seconds of idling, which is the signature of a transient
+    socket error rather than a broken pool — precisely the kind a second
+    attempt clears.
+
+    Only :class:`httpx.TransportError` is retried: it means the response never
+    arrived, so nothing is known to have happened. An API error is a real
+    answer from the server and gets no second attempt. Writes call `_run` and
+    keep their single attempt, because a retried insert whose first try landed
+    would duplicate the row — the response is what went missing, not the
+    effect.
+    """
+    try:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    except httpx.TransportError:
+        log.warning("Supabase read failed at the transport; retrying once")
+    except Exception:  # noqa: BLE001 - persistence is never fatal
+        log.warning("Supabase call failed", exc_info=True)
+        return None
+    try:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    except Exception:  # noqa: BLE001
+        log.warning("Supabase read failed again", exc_info=True)
         return None
 
 
@@ -105,9 +145,24 @@ async def create_session(
         row["agent_id"] = agent_id
     if section:
         row["section"] = section
+    created = True
     if enabled():
         client = get_client()
-        res = await _run(lambda: client.table("sessions").upsert(row).execute())
+        # `_read`, not `_run`, although this is a write. The retry rule `_read`
+        # documents is "only retry when nothing is known to have happened", and
+        # its usual counter-example — a retried insert whose first attempt
+        # landed duplicates the row — does not apply here: this is an `upsert`
+        # on a `session_id` the caller already chose, so a second attempt on
+        # the same id is the same row, not another one.
+        #
+        # It matters because everything else about a conversation hangs off
+        # this row. `messages` and `token_usage` carry a foreign key onto it,
+        # and both are written through `fire`, which logs a failure at warning
+        # and moves on. So a single transport blip here used to end with a run
+        # that streamed perfectly, answered the user, and saved not one word of
+        # itself — silently, because every FK violation that followed was
+        # swallowed one by one.
+        res = await _read(lambda: client.table("sessions").upsert(row).execute())
         if res is None and (agent_id or section):
             # A database that has not run the migrations rejects the whole
             # insert. Retry without the new columns so the conversation is not
@@ -118,23 +173,43 @@ async def create_session(
                 "sessions.agent_id/section rejected — run the `alter table` "
                 "statements in schema.sql. Falling back to an insert without them."
             )
-            await _run(
+            res = await _read(
                 lambda: client.table("sessions")
                 .upsert(
                     {k: v for k, v in row.items() if k not in ("agent_id", "section")}
                 )
                 .execute()
             )
+        created = res is not None
+        if not created:
+            # Said once, loudly, and reported to the caller. Everything after
+            # this point writes against a row that is not there, and the
+            # failures are individually swallowed — so this line is the only
+            # place the problem is visible before someone notices a whole
+            # conversation missing from their history.
+            log.error(
+                "Could not create session row `%s`; nothing from this "
+                "conversation will be persisted (its messages and usage rows "
+                "have a foreign key onto it).",
+                session_id,
+            )
     # The shelf flags are column defaults rather than part of the insert, so a
     # database that has not run the `alter table` yet still accepts new
     # sessions — `messages` has a foreign key onto this row, so a failed insert
     # here loses the whole conversation, not just two booleans.
+    #
+    # `persisted` is the one field here that is not a column. It is the honest
+    # answer to "did this land", so a caller who cares — the websocket handler
+    # does, because the user is about to type into a conversation that will not
+    # be saved — can tell the user rather than finding out from an empty
+    # history later.
     return {
         **row,
         "agent_id": agent_id,
         "section": section,
         "is_pinned": False,
         "is_archived": False,
+        "persisted": created and enabled(),
     }
 
 
@@ -159,7 +234,7 @@ async def get_session(session_id: str) -> dict | None:
     if not enabled():
         return None
     client = get_client()
-    res = await _run(
+    res = await _read(
         lambda: client.table("sessions").select("*").eq("id", session_id).limit(1).execute()
     )
     rows = getattr(res, "data", None) if res else None
@@ -239,7 +314,7 @@ async def list_sessions(
             )
         return q.execute()
 
-    res = await _run(_query, True, True, True, project_scoped)
+    res = await _read(_query, True, True, True, project_scoped)
     sectioned_in_sql = res is not None
     # The project column is only ever filtered on the first attempt; every
     # fallback below drops it, so a database missing the column still returns a
@@ -250,12 +325,12 @@ async def list_sessions(
         # migrations. Rather than reporting an empty history, fall back through
         # the filters and reconcile in Python — an over-broad list is a much
         # better failure than a blank one.
-        res = await _run(_query, True, True, False)
+        res = await _read(_query, True, True, False)
         if res is None:
-            res = await _run(_query, True, False, False)
+            res = await _read(_query, True, False, False)
             scoped_in_sql = False
             if res is None:
-                res = await _run(_query, False, False, False)
+                res = await _read(_query, False, False, False)
                 rows = [r for r in (getattr(res, "data", None) or []) if not archived]
             else:
                 rows = getattr(res, "data", None) or []
@@ -471,7 +546,7 @@ async def list_messages(session_id: str, limit: int = 500) -> list[dict]:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     return getattr(res, "data", None) or []
 
 
@@ -506,7 +581,7 @@ async def get_files(session_id: str, file_ids: list[str] | None = None) -> list[
             q = q.in_("id", file_ids)
         return q.execute()
 
-    res = await _run(_query)
+    res = await _read(_query)
     return getattr(res, "data", None) or []
 
 
@@ -626,7 +701,7 @@ async def list_branches(session_id: str) -> list[dict]:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     return getattr(res, "data", None) or []
 
 
@@ -650,7 +725,7 @@ async def branch_versions(session_id: str, turn_index: int) -> list[dict]:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     return getattr(res, "data", None) or []
 
 
@@ -707,7 +782,7 @@ async def get_branch(
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     rows = getattr(res, "data", None) if res else None
     return rows[0] if rows else None
 
@@ -830,7 +905,7 @@ async def list_feedback(session_id: str, user_id: str = "anonymous") -> list[dic
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     return getattr(res, "data", None) or []
 
 
@@ -857,7 +932,7 @@ async def get_preferences(user_id: str) -> dict:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     rows = getattr(res, "data", None) if res else None
     return rows[0] if rows else {}
 
@@ -912,6 +987,7 @@ async def search_sessions(
     section: str | None = None,
     agent_id: str | None = None,
     limit: int = 30,
+    across: bool = False,
 ) -> list[dict]:
     """Sessions whose title *or transcript* matches ``query``.
 
@@ -924,6 +1000,13 @@ async def search_sessions(
 
     No model is involved. This is two indexed `ilike` scans and a merge — a
     search box that waited on an LLM would be both slower and worse.
+
+    ``across`` searches every surface at once — Chat, Code and all ten
+    specialists — and is the one mode that cannot be expressed by leaving the
+    other two arguments unset. Absent ``agent_id`` does not mean "any agent";
+    it means ``agent_id is null``, which is precisely how a Chat/Code search
+    keeps the specialists out of its results. So "everywhere" needs saying
+    rather than defaulting, and it drops both filters instead of setting them.
     """
     term = (query or "").strip()
     if not enabled() or not term:
@@ -939,15 +1022,24 @@ async def search_sessions(
     client = get_client()
     pattern = f"%{needle}%"
 
+    def _scope(q):
+        """The surface filter, applied identically to both scoping queries."""
+        if across:
+            return q
+        q = q.eq("agent_id", agent_id) if agent_id else q.is_("agent_id", "null")
+        if section == "chat":
+            # Pre-migration rows carry no section and are shown in Chat; see
+            # scripts/audit_session_sections.py.
+            q = q.or_("section.eq.chat,section.is.null")
+        elif section:
+            q = q.eq("section", section)
+        return q
+
     def _sessions():
         q = client.table("sessions").select("*").ilike("title", pattern)
         q = q.eq("user_id", user_id) if user_id else q.is_("user_id", "null")
         q = q.eq("is_archived", False)
-        q = q.eq("agent_id", agent_id) if agent_id else q.is_("agent_id", "null")
-        if section == "chat":
-            q = q.or_("section.eq.chat,section.is.null")
-        elif section:
-            q = q.eq("section", section)
+        q = _scope(q)
         return q.order("updated_at", desc=True).limit(limit).execute()
 
     def _messages():
@@ -994,14 +1086,10 @@ async def search_sessions(
             q = client.table("sessions").select("*").in_("id", ordered[: limit * 3])
             q = q.eq("user_id", user_id) if user_id else q.is_("user_id", "null")
             q = q.eq("is_archived", False)
-            q = q.eq("agent_id", agent_id) if agent_id else q.is_("agent_id", "null")
-            if section == "chat":
-                q = q.or_("section.eq.chat,section.is.null")
-            elif section:
-                q = q.eq("section", section)
+            q = _scope(q)
             return q.execute()
 
-        owned = await _run(_owned)
+        owned = await _read(_owned)
         by_id = {r["id"]: r for r in (getattr(owned, "data", None) or [])}
         for sid in ordered:
             row = by_id.get(sid)
@@ -1091,7 +1179,7 @@ async def list_projects(
         q = q.is_("user_id", "null") if user_id is None else q.eq("user_id", user_id)
         return q.order("updated_at", desc=True).limit(limit).execute()
 
-    res = await _run(_query)
+    res = await _read(_query)
     return (getattr(res, "data", None) if res else None) or []
 
 
@@ -1113,7 +1201,7 @@ async def get_project(project_id: str) -> dict | None:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     rows = getattr(res, "data", None) if res else None
     return rows[0] if rows else None
 
@@ -1236,7 +1324,7 @@ async def list_project_files(project_id: str, with_content: bool = False) -> lis
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     return (getattr(res, "data", None) if res else None) or []
 
 
@@ -1261,7 +1349,7 @@ async def get_project_files(file_ids: list[str]) -> dict[str, dict]:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     rows = (getattr(res, "data", None) if res else None) or []
     return {r["id"]: r for r in rows if r.get("id")}
 
@@ -1281,7 +1369,7 @@ async def get_project_file(file_id: str) -> dict | None:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     rows = getattr(res, "data", None) if res else None
     return rows[0] if rows else None
 
@@ -1317,7 +1405,7 @@ async def list_memories(user_id: str, limit: int = 200) -> list[dict]:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     return (getattr(res, "data", None) if res else None) or []
 
 
@@ -1437,7 +1525,7 @@ async def get_artifact(session_id: str, artifact_key: str) -> dict | None:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     rows = getattr(res, "data", None) if res else None
     return rows[0] if rows else None
 
@@ -1462,7 +1550,7 @@ async def list_artifacts(session_id: str) -> list[dict]:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     rows = (getattr(res, "data", None) if res else None) or []
     # Highest version wins per key. Ordered by version descending above, so the
     # first row seen for a key is its current version.
@@ -1492,5 +1580,5 @@ async def artifact_versions(session_id: str, artifact_key: str) -> list[dict]:
             .execute()
         )
 
-    res = await _run(_query)
+    res = await _read(_query)
     return (getattr(res, "data", None) if res else None) or []

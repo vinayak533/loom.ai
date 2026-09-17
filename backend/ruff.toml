@@ -1,0 +1,73 @@
+# Lint configuration for the backend.
+#
+# The frontend has had ESLint for a while and the backend had nothing, which is
+# how an unused import and a file with no trailing newline both shipped. This
+# closes that, and is what CI runs beside `next lint`.
+#
+# The rule set is deliberately narrow. Ruff's default in recent versions is
+# broad enough to produce several hundred findings on this codebase, almost all
+# of them style opinions this project has already decided against — `BLE001`
+# alone fires on every `except Exception` that exists precisely so a logging or
+# metering failure cannot take down a live agent run, and those are load-bearing
+# and commented as such. A linter whose output is mostly noise gets muted, and a
+# muted linter catches nothing. So: the rules that find real defects, and no
+# rules that argue about taste.
+#
+#   E, W  pycodestyle errors and warnings — the trailing-newline and
+#         whitespace class of problem, plus E402 for import placement.
+#   F     pyflakes — unused imports, unused variables, undefined names. The
+#         highest-value set here: on its first run over this package it found
+#         `InsufficientCredits` caught but never imported in `api/rest.py`,
+#         which turned the 402 path into a NameError, and a logger shadowed by
+#         a coroutine of the same name in `tools/git.py`.
+#   B     bugbear. Kept for the rules that find real defects — a `zip` that
+#         silently truncates, a loop variable that is not what the body reads.
+#
+# Deliberately NOT selected:
+#
+#   I     import sorting. The ordering in this codebase is intentional in
+#         places the rule cannot see — every script sets `sys.path` before
+#         importing `app`, and several modules import late to keep an unused
+#         dependency out of worker boot. A rule that would reshuffle those is a
+#         rule that gets `# noqa`'d until it means nothing.
+#   UP    pyupgrade. Its findings here are all cosmetic (`datetime.UTC` for
+#         `timezone.utc`, unquoted annotations) and none of them is a defect.
+#         Worth a dedicated sweep one day; not worth mixing into a signal that
+#         should be all defects.
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "W", "F", "B"]
+
+ignore = [
+    # Line length is checked by eye here, not mechanically. The codebase wraps
+    # prose comments at ~79 and lets a few long string literals and table rows
+    # run past it, deliberately — breaking a URL or a pricing row across lines
+    # to satisfy a counter makes it harder to read, not easier.
+    "E501",
+    # `except Exception:` is the house pattern for every boundary where a
+    # failure must not propagate: persistence, metering, telemetry, stream
+    # teardown. Each one is commented with why. Flagging them all would bury
+    # the findings that matter.
+    "BLE001",
+    # A FastAPI route signature is `Depends(...)` in a default argument by
+    # design. There is no other way to write one.
+    "B008",
+    # "Use an f-string instead of `.format()`". True for a short call and
+    # actively wrong for a long one: the six-placeholder command built in
+    # `tools/workspace.export_zip` is a readable block as `.format()` with one
+    # named argument per line, and a 190-character single-line f-string when
+    # this rule has its way. The rule cannot tell the two cases apart, and the
+    # short case is not a defect worth a finding.
+    "UP032",
+]
+
+[lint.per-file-ignores]
+# Every script in `scripts/` sets `sys.path` before importing `app`, so its
+# imports genuinely cannot come first. The `# noqa: E402` markers are already
+# there and correct; this says so once rather than per line.
+"scripts/*.py" = ["E402"]
+
+[lint.isort]
+known-first-party = ["app"]

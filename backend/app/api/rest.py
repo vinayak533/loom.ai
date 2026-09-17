@@ -7,7 +7,17 @@ import logging
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 
 from app import events as ev
 from app.agent import runner
@@ -21,6 +31,7 @@ from app.api.ownership import (
 )
 from app.api.ratelimit import RateLimiter
 from app.config import get_settings
+from app.security import client_key, too_many
 from app.db import repository
 from app.emitter import registry as emitter_registry
 from app.files import MAX_UPLOAD_BYTES, PDF_TYPE, UploadRejected, save_upload
@@ -37,6 +48,12 @@ from app.llm_router import (
     section_default_models,
 )
 from app import analysis, artifacts, gitmsg, memory
+# Caught by the `/analyse` and commit-message endpoints below. It was never
+# imported, so both `except InsufficientCredits` clauses raised `NameError`
+# while handling the exception — turning the one case they exist for, a user
+# over their budget, into a 500 instead of the 402 the frontend knows how to
+# show. Found by ruff (F821) the first time it was run over this package.
+from app.credits import InsufficientCredits
 from app.learn import ingest
 from app.sources import ingest_youtube, is_youtube_url
 from app.tools import git, workspace
@@ -47,6 +64,12 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 _upload_limiter = RateLimiter(get_settings().rate_limit_uploads_per_minute)
+#: Per-address ceilings on the two things an anonymous caller can create
+#: without limit otherwise: session rows, and stored files. The limiters
+#: above are keyed by ids the client chooses, so they bound a *session*, not
+#: a *caller*; these bound the caller.
+_session_create_limiter = RateLimiter(30)
+_client_upload_limiter = RateLimiter(get_settings().rate_limit_uploads_per_minute * 3)
 
 
 @router.get("/config")
@@ -98,6 +121,7 @@ def _section(value: str | None) -> str:
 
 @router.post("/sessions", status_code=status.HTTP_201_CREATED)
 async def create_session(
+    request: Request,
     user_id: str | None = Depends(bearer_user),
     model_id: str | None = None,
     section: str | None = None,
@@ -108,6 +132,9 @@ async def create_session(
     otherwise identical rows. Defaults to 'chat' when absent so an older client
     cannot create an untagged session.
     """
+    allowed, retry_after = _session_create_limiter.check(client_key(request))
+    if not allowed:
+        raise too_many(retry_after, "new sessions")
     resolved_section = _section(section)
     # The *section's* default, not the roster-wide one: a Code session opens on
     # the Code model and a Chat session on the Chat model. An explicit
@@ -142,9 +169,17 @@ async def search_sessions(
     user_id: str | None = Depends(bearer_user),
     section: str | None = None,
     agent_id: str | None = None,
+    scope: str | None = None,
     limit: int = 30,
 ):
     """Find sessions by title or by something said in them.
+
+    `scope=all` searches every surface at once and ignores `section` and
+    `agent_id`. It has to be asked for by name: omitting both of those does
+    not mean "anywhere", it means "a Chat/Code session, not an agent's" —
+    which is what keeps the specialists out of a section's own search. The
+    rows come back carrying `section` and `agent_id` either way, so a
+    cross-surface caller can label each hit with where it actually lives.
 
     Two indexed `ilike` scans and a merge — no model is involved, and none
     should be. A search box that waits on a generative call is both slower and
@@ -158,12 +193,14 @@ async def search_sessions(
     for that is `GET /sessions`, and quietly answering a different question is
     how a debounced input ends up fetching everything on every backspace.
     """
+    across = scope == "all"
     return await repository.search_sessions(
         q,
         user_id=user_id,
-        section=_section(section) if section else None,
-        agent_id=agent_id,
+        section=None if across else (_section(section) if section else None),
+        agent_id=None if across else agent_id,
         limit=max(1, min(limit, 50)),
+        across=across,
     )
 
 
@@ -434,7 +471,9 @@ async def import_workspace_files(
         )
 
     payload: list[tuple[str, bytes]] = []
-    for rel, upload in zip(relative, files):
+    # The lengths were checked above; `strict` makes that check the only
+    # way through rather than one of two.
+    for rel, upload in zip(relative, files, strict=True):
         payload.append((str(rel), await upload.read()))
 
     try:
@@ -592,8 +631,18 @@ def _broadcast_git(session_id: str, snapshot: dict) -> None:
             status=snapshot["status"],
             log=snapshot["log"],
             path=snapshot["path"],
+            remote=snapshot.get("remote"),
+            auto_push=bool(snapshot.get("auto_push")),
         )
     )
+
+
+#: What `GET /git` answers for a session with no sandbox: the same shape as
+#: `git.snapshot`, so the panel has one type to render.
+_NO_REPO = {
+    "repo": False, "path": "", "branch": None, "status": [], "log": [],
+    "remote": None, "auto_push": False,
+}
 
 
 @router.get("/sessions/{session_id}/git")
@@ -611,11 +660,11 @@ async def git_status(
     """
     await require_session_write(user_id, session_id)
     if sandbox_manager.sandbox_id_for(session_id) is None:
-        return {"repo": False, "path": "", "branch": None, "status": [], "log": []}
+        return dict(_NO_REPO)
     try:
         return await git.snapshot(session_id, limit=limit)
     except SandboxUnavailable:
-        return {"repo": False, "path": "", "branch": None, "status": [], "log": []}
+        return dict(_NO_REPO)
 
 
 @router.post("/sessions/{session_id}/git/commit")
@@ -670,11 +719,112 @@ async def git_init(session_id: str, user_id: str | None = Depends(bearer_user)):
     return {**info, "snapshot": snapshot}
 
 
+# --- remote, push, auto-push -----------------------------------------------
+#
+# Three small endpoints rather than one with a mode, because they answer three
+# different questions and two of them are state changes a person should be
+# able to make separately: "where does this go", "send it now", and "keep
+# sending it". The credential is never in any request or response — it is the
+# server's, read from settings at the moment of the push and nowhere else.
+
+
+@router.get("/sessions/{session_id}/git/remote")
+async def git_remote(session_id: str, user_id: str | None = Depends(bearer_user)):
+    """The remote and the auto-push opt-in, plus whether a push could authenticate."""
+    await require_session_write(user_id, session_id)
+    can_push = bool(get_settings().git_push_token)
+    if sandbox_manager.sandbox_id_for(session_id) is None:
+        return {"remote": None, "auto_push": False, "can_push": can_push}
+    try:
+        return {
+            "remote": await git.remote_url(session_id),
+            "auto_push": await git.auto_push(session_id),
+            "can_push": can_push,
+        }
+    except SandboxUnavailable:
+        return {"remote": None, "auto_push": False, "can_push": can_push}
+
+
+@router.post("/sessions/{session_id}/git/remote")
+async def git_set_remote(
+    session_id: str,
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Set `origin`. Creates the repository first if there is none.
+
+    The URL is validated by `git.validate_remote_url`: https only, and no
+    username or token inside it — the one place a credential must never go
+    is a config file the sandbox can read back.
+    """
+    await require_session_write(user_id, session_id)
+    url = str((payload or {}).get("url") or "")
+    try:
+        if url.strip():
+            result = await git.set_remote(session_id, url)
+        else:
+            result = await git.remove_remote(session_id)
+    except git.GitError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except SandboxUnavailable as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    snapshot = await git.snapshot(session_id)
+    _broadcast_git(session_id, snapshot)
+    return {**result, "snapshot": snapshot}
+
+
+@router.post("/sessions/{session_id}/git/push")
+async def git_push(session_id: str, user_id: str | None = Depends(bearer_user)):
+    """Push the current branch to `origin` with the server's credential.
+
+    A push that could not happen for a reason git is not to blame for — no
+    remote, no commits, no credential — comes back as `pushed: false` with a
+    `reason`, so the panel can say what to do. A push git refused is a 400
+    carrying git's own message.
+    """
+    await require_session_write(user_id, session_id)
+    try:
+        result = await git.push(session_id, token=get_settings().git_push_token or None)
+    except git.GitError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except SandboxUnavailable as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    snapshot = await git.snapshot(session_id)
+    _broadcast_git(session_id, snapshot)
+    return {**result, "snapshot": snapshot}
+
+
+@router.post("/sessions/{session_id}/git/auto")
+async def git_auto_push(
+    session_id: str,
+    payload: dict | None = None,
+    user_id: str | None = Depends(bearer_user),
+):
+    """Turn the end-of-turn commit and push on or off for this repository.
+
+    Off is the default and stays the default: this is the opt-in that makes
+    an agent turn end the way a Claude Code turn does, and the person turning
+    it on is the person deciding that every turn from here is worth recording.
+    """
+    await require_session_write(user_id, session_id)
+    enabled = bool((payload or {}).get("enabled"))
+    try:
+        result = await git.set_auto_push(session_id, enabled)
+    except git.GitError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except SandboxUnavailable as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    snapshot = await git.snapshot(session_id)
+    _broadcast_git(session_id, snapshot)
+    return {**result, "snapshot": snapshot}
+
+
 # --- uploads ---------------------------------------------------------------
 
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload(
+    request: Request,
     session_id: str = Form(...),
     file: UploadFile = File(...),
     user_id: str | None = Depends(bearer_user),
@@ -682,10 +832,10 @@ async def upload(
     await require_session_write(user_id, session_id)
     allowed, retry_after = _upload_limiter.check(session_id)
     if not allowed:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            f"Too many uploads. Try again in {retry_after}s.",
-        )
+        raise too_many(retry_after, "uploads")
+    allowed, retry_after = _client_upload_limiter.check(client_key(request))
+    if not allowed:
+        raise too_many(retry_after, "uploads")
 
     data = await file.read()
     try:
@@ -770,8 +920,15 @@ async def get_feedback(
     Scoped to the caller, not the session. Two people looking at the same
     shared transcript are entitled to disagree about it, and a control that
     shows somebody else's verdict as your own is simply wrong.
+
+    Tolerant of a session that has not landed yet, like every other read the
+    client issues when a transcript opens. The browser mints the session id
+    locally and the websocket inserts the row, so the first paint of a new
+    session raced that insert and got a 404 — for a question whose honest
+    answer is "no thumbs yet", and which is an empty list either way. It read
+    as a failed request in the browser console on every new session.
     """
-    await require_session(user_id, session_id)
+    await require_session_write(user_id, session_id)
     return await repository.list_feedback(session_id, user_id or "anonymous")
 
 
@@ -1454,8 +1611,13 @@ async def list_artifacts(session_id: str, user_id: str | None = Depends(bearer_u
     Content included: an artifact *is* the thing being looked at, and a
     listing that omitted it would be followed immediately by a read of each
     one. Size is bounded on the way in by `artifacts.MAX_CONTENT_CHARS`.
+
+    Tolerant of a not-yet-inserted session for the same reason as the feedback
+    listing above: it is one of the reads that fires as a transcript opens,
+    and a session with no row cannot have artifacts, which is what an empty
+    list says.
     """
-    await require_session(user_id, session_id)
+    await require_session_write(user_id, session_id)
     return await repository.list_artifacts(session_id)
 
 

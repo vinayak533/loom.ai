@@ -58,6 +58,7 @@ export type TraceKind = "user" | "agent" | "tool" | "notice" | "pending" | "gate
 
 const TOOL_GLYPH: Record<string, string> = {
   bash_execute: "$",
+  git: "⎇",
   web_search: "⌕",
   edit_file: "±",
   write_file: "+",

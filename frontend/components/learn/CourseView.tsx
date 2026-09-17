@@ -68,7 +68,7 @@ export function CourseView({
             disabled={busy || !canGenerate}
             className="mt-5 inline-flex h-9 items-center gap-2 rounded-ctl bg-gradient-to-br
                        from-accent to-accent-alt px-4 text-[0.8125rem] font-semibold text-accent-ink
-                       transition-all duration-200 hover:brightness-110 active:scale-[0.97]
+                       transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:brightness-110 active:scale-[0.97]
                        disabled:opacity-40"
           >
             {busy ? (
@@ -126,7 +126,7 @@ export function CourseView({
                 >
                   <span
                     className={cn(
-                      "mt-px grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[0.625rem]",
+                      "mt-px grid h-5 w-5 shrink-0 place-items-center rounded-full border text-2xs",
                       "font-mono transition-colors duration-200",
                       complete
                         ? "border-accent bg-accent text-accent-ink"
@@ -210,7 +210,7 @@ export function CourseView({
                 onClick={() => onComplete(active.id, !done.has(active.id))}
                 className={cn(
                   "flex h-9 items-center gap-2 rounded-ctl px-3.5 text-[0.8125rem] font-medium",
-                  "transition-all duration-200 active:scale-[0.98]",
+                  "transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 active:scale-[0.98]",
                   done.has(active.id)
                     ? "border border-accent-line bg-accent-soft text-accent"
                     : "border border-line bg-elevated text-ink hover:border-accent-line hover:bg-raised",
@@ -225,7 +225,7 @@ export function CourseView({
                   type="button"
                   onClick={() => setActiveId(lessons[active.section_order + 1].id)}
                   className="ml-auto flex h-9 items-center gap-1.5 rounded-ctl bg-accent px-3.5
-                             text-[0.8125rem] font-semibold text-accent-ink transition-all
+                             text-[0.8125rem] font-semibold text-accent-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter]
                              duration-200 hover:brightness-110 active:scale-[0.98]"
                 >
                   Next section
@@ -283,7 +283,7 @@ function Quiz({ questions }: { questions: QuizQuestion[] }) {
                       onClick={() => setPicked((p) => ({ ...p, [qi]: oi }))}
                       className={cn(
                         "flex w-full items-center gap-2.5 rounded-ctl border px-3 py-2 text-left",
-                        "text-[0.8125rem] transition-all duration-200",
+                        "text-[0.8125rem] transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
                         !answered &&
                           "border-line bg-inset text-ink-muted hover:border-accent-line hover:text-ink",
                         answered && correct && "border-add/40 bg-add-bg text-ink",
@@ -293,7 +293,7 @@ function Quiz({ questions }: { questions: QuizQuestion[] }) {
                     >
                       <span
                         className={cn(
-                          "grid h-5 w-5 shrink-0 place-items-center rounded-full border font-mono text-[0.625rem]",
+                          "grid h-5 w-5 shrink-0 place-items-center rounded-full border font-mono text-2xs",
                           answered && correct
                             ? "border-add text-add"
                             : answered && chosen

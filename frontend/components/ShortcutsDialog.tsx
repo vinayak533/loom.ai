@@ -1,9 +1,10 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
 import { SPRING_SOFT, useMotionOK } from "./Anim";
+import { useFocusTrap } from "@/lib/useFocusTrap";
 import type { Section } from "@/lib/sections";
 
 /**
@@ -110,6 +111,8 @@ export function ShortcutsDialog({
   section: Section;
 }) {
   const motionOK = useMotionOK();
+  const dialog = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialog, open);
 
   useEffect(() => {
     if (!open) return;
@@ -147,6 +150,7 @@ export function ShortcutsDialog({
           />
 
           <motion.div
+            ref={dialog}
             role="dialog"
             aria-modal="true"
             aria-label="Keyboard shortcuts"
@@ -156,7 +160,7 @@ export function ShortcutsDialog({
             transition={motionOK ? SPRING_SOFT : { duration: 0 }}
             className="glass relative w-full max-w-[32rem] rounded-card"
           >
-            <header className="flex items-center justify-between border-b border-line px-5 py-4">
+            <header className="flex h-bar items-center justify-between border-b border-line px-5">
               <h2 className="text-sm font-semibold tracking-[-0.005em] text-ink">
                 Keyboard shortcuts
               </h2>

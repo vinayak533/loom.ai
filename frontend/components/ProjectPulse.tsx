@@ -5,6 +5,7 @@ import { memo } from "react";
 import type { FileNode } from "@/lib/events";
 import type { AgentStatus, ChangedFile } from "@/lib/useAgentSocket";
 import { cn, shortPath } from "@/lib/cn";
+import { Sparkline } from "./Sparkline";
 import { AnimationBoundary, SPRING, useMotionOK } from "./Anim";
 import { FileTree, type TreeActions } from "./FileTree";
 import { ProjectHealth } from "./ProjectHealth";
@@ -48,10 +49,12 @@ export const ProjectPulse = memo(function ProjectPulse({
   connected,
   iterations,
   usage,
+  usageHistory,
   changed,
   activeFile,
   tree,
   treeRoot,
+  sandboxIdle = false,
   flash,
   modelName,
   routingMode,
@@ -67,10 +70,14 @@ export const ProjectPulse = memo(function ProjectPulse({
   connected: boolean;
   iterations: number;
   usage: { input: number; output: number; cost: number };
+  /** Tokens per turn, oldest first. Two or more points draw a sparkline. */
+  usageHistory?: number[];
   changed: Record<string, ChangedFile>;
   activeFile: string | null;
   tree: FileNode[];
   treeRoot: string;
+  /** Sandbox reaped, workspace intact — see `FileTree`'s `idle`. */
+  sandboxIdle?: boolean;
   flash: Record<string, number>;
   modelName: string;
   routingMode: "manual" | "auto";
@@ -168,17 +175,40 @@ export const ProjectPulse = memo(function ProjectPulse({
         </div>
       </Block>
 
-      {/* ------------------------------------------------------------ spend */}
+      {/* ------------------------------------------------------------ usage */}
+      {/* Tokens only. The Code section deliberately reports no money: a
+          per-session dollar estimate here was a number nobody could act on
+          mid-run, and the credit meter in Agents is the one place spend is
+          actually accounted for. `usage.cost` is still carried on the socket
+          and still written to `token_usage`; it is simply not rendered here. */}
       <Block label="This session">
         <dl className="grid grid-cols-3 gap-px overflow-hidden rounded-ctl border border-line bg-line mx-3">
           <Stat label="steps" value={iterations.toLocaleString()} />
           <Stat
-            label="tokens"
-            value={compact(usage.input + usage.output)}
-            title={`${usage.input.toLocaleString()} in · ${usage.output.toLocaleString()} out`}
+            label="tokens in"
+            value={compact(usage.input)}
+            title={`${usage.input.toLocaleString()} input tokens`}
           />
-          <Stat label="cost" value={`$${usage.cost.toFixed(3)}`} />
+          <Stat
+            label="tokens out"
+            value={compact(usage.output)}
+            title={`${usage.output.toLocaleString()} output tokens`}
+          />
         </dl>
+        {/* A read-out becomes an instrument: the shape of the spend across
+            the session's turns, which is what tells you a run is getting
+            more expensive before the total does. */}
+        {usageHistory && usageHistory.length > 1 && (
+          <div className="mx-3 mt-2.5 flex items-end justify-between gap-3">
+            <span className="voice-label">tokens per turn</span>
+            <Sparkline
+              values={usageHistory}
+              width={150}
+              height={34}
+              label={`Tokens per turn, last ${usageHistory.length} turns`}
+            />
+          </div>
+        )}
       </Block>
 
       {/* ---------------------------------------------------------- changed */}
@@ -219,7 +249,7 @@ export const ProjectPulse = memo(function ProjectPulse({
             disabled={exporting}
             className="flex h-8 touch:h-11 flex-1 items-center justify-center gap-1.5 rounded-ctl border
                        border-line bg-elevated text-2xs font-medium text-ink-muted
-                       transition-all duration-200 hover:border-accent-line hover:bg-raised
+                       transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:border-accent-line hover:bg-raised
                        hover:text-ink active:scale-[0.985] disabled:pointer-events-none
                        disabled:opacity-55"
           >
@@ -231,14 +261,6 @@ export const ProjectPulse = memo(function ProjectPulse({
             {exporting ? "Packaging…" : "Export .zip"}
           </button>
 
-          <span
-            title="Vercel deployment is not wired up yet."
-            className="flex h-8 touch:h-11 flex-1 cursor-not-allowed items-center justify-center gap-1.5
-                       rounded-ctl border border-line bg-inset text-2xs font-medium text-ink-dim"
-          >
-            Deploy
-            <span className="voice-label text-[0.5rem] text-ink-dim">soon</span>
-          </span>
         </div>
       </Block>
 
@@ -252,6 +274,7 @@ export const ProjectPulse = memo(function ProjectPulse({
           changed={changed}
           onSelect={onSelectFile}
           actions={treeActions}
+          idle={sandboxIdle}
         />
       </Block>
 
@@ -346,9 +369,9 @@ function Stat({
   title?: string;
 }) {
   return (
-    <div className="bg-surface-solid px-2.5 py-2" title={title}>
+    <div className="bg-surface-solid px-2.5 py-2" data-tip={title}>
       <dd className="voice-machine text-[0.8125rem] text-ink">{value}</dd>
-      <dt className="voice-label mt-1 text-[0.5625rem]">{label}</dt>
+      <dt className="voice-label mt-1 text-2xs">{label}</dt>
     </div>
   );
 }

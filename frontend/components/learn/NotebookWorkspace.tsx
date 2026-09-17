@@ -97,7 +97,7 @@ export function NotebookWorkspace({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* ------------------------------------------------------ breadcrumb */}
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-3 sm:px-4">
+      <header className="flex h-bar-sub shrink-0 items-center gap-2 border-b border-line px-3.5">
         <button
           type="button"
           onClick={onBack}
@@ -110,7 +110,7 @@ export function NotebookWorkspace({
           Library
         </button>
 
-        <span className="text-ink-dim" aria-hidden>
+        <span className="text-ink-decor" aria-hidden>
           /
         </span>
 
@@ -138,7 +138,7 @@ export function NotebookWorkspace({
               setDraftTitle(title);
               setRenaming(true);
             }}
-            title="Rename notebook"
+            data-tip="Rename notebook"
             className="truncate rounded-ctl px-1.5 py-1 text-[0.875rem] font-medium text-ink
                        transition-colors duration-200 hover:bg-elevated"
           >

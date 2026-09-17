@@ -80,7 +80,11 @@ def _tokens(text: str) -> Iterable[str]:
     yield from words
     # Bigrams give the vector a little word order, which is the difference
     # between matching "binary search" and matching any chunk with "search".
-    for a, b in zip(words, words[1:]):
+    # `strict=False`, and the one place in this codebase where that is the
+    # answer rather than a shrug: the two sides are deliberately different
+    # lengths — n words make n-1 bigrams — so stopping at the shorter is
+    # the intent, not an accident waiting to be caught.
+    for a, b in zip(words, words[1:], strict=False):
         yield f"{a}_{b}"
 
 
@@ -95,7 +99,7 @@ def cosine(a: list[float], b: list[float]) -> float:
     """Both sides are unit vectors, so this is just the dot product."""
     if not a or not b or len(a) != len(b):
         return 0.0
-    return sum(x * y for x, y in zip(a, b))
+    return sum(x * y for x, y in zip(a, b, strict=True))
 
 
 #: Function words carry no retrieval signal and, hashed, are pure collision

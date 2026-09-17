@@ -3,21 +3,25 @@ import { cn } from "@/lib/cn";
 /**
  * The brand mark.
  *
- * The source artwork is an app-icon tile: gold script on a near-black
- * (#10101B) rounded square. Two consequences drive everything here.
+ * The source artwork was an app-icon tile: gold script on a #13131C rounded
+ * square. That tile was drawn for an icon grid, and on Loom's true-black floor
+ * it read as its own slightly-lit, slightly-blue square — a logo carrying a
+ * background colour the product does not have. The assets in `public/` are
+ * therefore re-cut (`scripts/remask-loom-mark.py`): the tile is gone, the
+ * script is the brand gold (`--gold`) on transparency, and the page paints the
+ * tile. Whatever the floor is, the mark sits *on* it rather than in front of
+ * it. Two consequences drive the rest.
  *
  * First, **it is shipped pre-masked at four sizes** rather than as one asset
  * scaled by CSS. The script is a hairline at small sizes, and a browser
  * downscaling a 512px PNG into a 22px rail slot turns it to mush; picking the
  * nearest asset at or above the device-pixel size keeps the strokes crisp.
  *
- * Second, **the tile needs an edge on true black.** At #10101B on #000000 the
- * silhouette is a ~1.3:1 step — the gold reads fine, but the tile's own shape
- * dissolves and the mark looks like a floating squiggle rather than a logo. So
- * a hairline ring is drawn over it on the same `line` token every other surface
- * in the app uses, at the same 22.36% radius the alpha mask was cut with. That
- * is the "sits well on pure black" treatment; it is not a decorative border,
- * and it is the only thing added to the artwork.
+ * Second, **the tile still needs an edge.** With no fill of its own the mark
+ * would be a floating squiggle, so a hairline ring is drawn on the same
+ * `line` token every other surface uses, at the 22.36% radius the original
+ * mask was cut with. It is not a decorative border; it is the tile's outline,
+ * and the only thing added to the artwork.
  */
 
 /** The sizes actually generated into `public/`. Keep in sync with the assets. */

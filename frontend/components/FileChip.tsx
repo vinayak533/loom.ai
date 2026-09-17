@@ -183,8 +183,13 @@ export function FileChip({
         <span className="truncate text-2xs font-medium text-ink">{title}</span>
         <span
           className={cn(
+            // The chip's status line — "Uploading — 47%", "Attached", or the
+            // reason it failed. `ink-faint` on the chip's own `bg-raised`
+            // measures ~3.2:1, the lowest contrast anywhere in the composer,
+            // and it is the only thing that says whether an upload is working.
+            // `ink-muted` on the same ground clears 5:1.
             "truncate text-[11px]",
-            failed ? "text-warn" : "text-ink-faint",
+            failed ? "text-warn" : "text-ink-muted",
           )}
         >
           {state.phase === "error"
@@ -202,8 +207,10 @@ export function FileChip({
           type="button"
           onClick={onDismiss}
           aria-label={uploading ? `Cancel upload of ${title}` : `Remove ${title}`}
-          title={uploading ? "Cancel" : "Remove"}
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink-faint
+          data-tip={uploading ? "Cancel" : "Remove"}
+          // Cancel-an-upload / remove-a-file. A control, so it has to read as
+          // one rather than as decoration on a chip.
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink-muted
                      transition-colors duration-200 hover:bg-white/[0.08] hover:text-ink"
         >
           <X size={13} strokeWidth={2.2} aria-hidden />

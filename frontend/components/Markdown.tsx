@@ -6,29 +6,85 @@ import { CodeBlock } from "./CodeBlock";
 /**
  * A deliberately small Markdown renderer.
  *
- * Agent prose is mostly paragraphs, lists, inline code and fenced blocks — so
- * we handle exactly those rather than pulling in a full parser. Nothing is
- * rendered as raw HTML, which also keeps model output from injecting markup.
+ * Agent prose is paragraphs, lists, inline code, fenced blocks, and (because
+ * the agent is the product and a comparison is the most common thing it is
+ * asked for) tables, links and quotes. Those are handled here, by hand,
+ * rather than by pulling in a full parser: nothing is ever rendered as raw
+ * HTML, which is what keeps model output from injecting markup, and the two
+ * things a library would not give us are kept: a fence stays open while it
+ * streams, and spacing is chosen from the *pair* of adjacent blocks.
+ *
+ * Links are the one place model output reaches outside the page, so the href
+ * is checked before it is rendered: only `http`, `https` and `mailto` get
+ * through, and every link is `rel="noopener noreferrer"` in a new tab. A
+ * `javascript:` URL renders as plain text.
  *
  * The spacing here is the point of this file, not an afterthought. A uniform
- * gap between every block — which is what `space-y-3.5` was doing — is the
- * single most reliable way to make generated prose look generated: a heading
- * ends up as far from the paragraph it introduces as from the one it follows,
- * so nothing groups and the whole answer reads as undifferentiated. Margins
- * are therefore chosen from the *pair* of blocks (see `topMargin`), which is
- * how a heading gets a large space above and a small one below, and how a list
+ * gap between every block is the single most reliable way to make generated
+ * prose look generated: a heading ends up as far from the paragraph it
+ * introduces as from the one it follows, so nothing groups. Margins are
+ * therefore chosen from the pair of blocks (see `topMargin`), which is how a
+ * heading gets a large space above and a small one below, and how a list
  * sits closer to its lead-in than to the next section.
  *
  * Only top margins are set. Spacing a stack from one direction means two
  * adjacent rules can never disagree about the gap between them.
  */
 
+type ListItem = { body: string; children?: Block };
+
 type Block =
   | { t: "code"; lang: string; body: string; closed: boolean }
   | { t: "p"; body: string }
-  | { t: "ul"; items: string[] }
-  | { t: "ol"; items: string[] }
-  | { t: "h"; level: number; body: string };
+  | { t: "ul"; items: ListItem[] }
+  | { t: "ol"; items: ListItem[]; start: number }
+  | { t: "h"; level: number; body: string }
+  | { t: "quote"; blocks: Block[] }
+  | { t: "table"; head: string[]; align: Array<"l" | "c" | "r">; rows: string[][] }
+  | { t: "hr" };
+
+const UL_RE = /^(\s*)[-*+]\s+(.*)$/;
+const OL_RE = /^(\s*)(\d+)[.)]\s+(.*)$/;
+const TABLE_SEP_RE = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
+
+function isBlockStart(line: string): boolean {
+  return (
+    /^```/.test(line) ||
+    UL_RE.test(line) ||
+    OL_RE.test(line) ||
+    /^#{1,4}\s/.test(line) ||
+    /^\s*>/.test(line) ||
+    /^\s*([-*_])(\s*\1){2,}\s*$/.test(line)
+  );
+}
+
+/** Split a table row on unescaped pipes, dropping the outer ones. */
+function splitRow(line: string): string[] {
+  const cells: string[] = [];
+  let cur = "";
+  let inCode = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === "\\" && line[i + 1] === "|") {
+      cur += "|";
+      i++;
+      continue;
+    }
+    if (ch === "`") inCode = !inCode;
+    if (ch === "|" && !inCode) {
+      cells.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  cells.push(cur);
+  if (cells.length && !cells[0].trim() && line.trimStart().startsWith("|")) cells.shift();
+  if (cells.length && !cells[cells.length - 1].trim() && line.trimEnd().endsWith("|")) {
+    cells.pop();
+  }
+  return cells.map((c) => c.trim());
+}
 
 function parse(src: string): Block[] {
   const blocks: Block[] = [];
@@ -55,30 +111,89 @@ function parse(src: string): Block[] {
       continue;
     }
 
-    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    const heading = line.match(/^(#{1,4})\s+(.*?)\s*#*\s*$/);
     if (heading) {
       blocks.push({ t: "h", level: heading[1].length, body: heading[2] });
       i++;
       continue;
     }
 
-    if (/^\s*[-*]\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*[-*]\s+/, ""));
-        i++;
-      }
-      blocks.push({ t: "ul", items });
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      blocks.push({ t: "hr" });
+      i++;
       continue;
     }
 
-    if (/^\s*\d+\.\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*\d+\.\s+/, ""));
+    // blockquote: consecutive `>` lines, parsed recursively so a quoted list
+    // or code block still renders as one.
+    if (/^\s*>/.test(line)) {
+      const inner: string[] = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) {
+        inner.push(lines[i].replace(/^\s*>\s?/, ""));
         i++;
       }
-      blocks.push({ t: "ol", items });
+      blocks.push({ t: "quote", blocks: parse(inner.join("\n")) });
+      continue;
+    }
+
+    // GFM table: a header row, a separator row, then body rows. Recognised
+    // only once the separator has arrived, so a streaming header line is a
+    // paragraph until the next line confirms what it is.
+    if (line.includes("|") && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1])) {
+      const head = splitRow(line);
+      const align = splitRow(lines[i + 1]).map((c) => {
+        const l = c.startsWith(":");
+        const r = c.endsWith(":");
+        return l && r ? "c" : r ? "r" : "l";
+      }) as Array<"l" | "c" | "r">;
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) {
+        rows.push(splitRow(lines[i]));
+        i++;
+      }
+      blocks.push({ t: "table", head, align, rows });
+      continue;
+    }
+
+    if (UL_RE.test(line) || OL_RE.test(line)) {
+      const ordered = OL_RE.test(line);
+      const re = ordered ? OL_RE : UL_RE;
+      const baseIndent = (line.match(re) as RegExpMatchArray)[1].length;
+      const start = ordered ? Number((line.match(OL_RE) as RegExpMatchArray)[2]) || 1 : 1;
+      const items: ListItem[] = [];
+
+      while (i < lines.length) {
+        const m = lines[i].match(re);
+        if (!m || m[1].length !== baseIndent) break;
+        let body = ordered ? m[3] : m[2];
+        i++;
+        // One level of nesting: lines indented deeper than this item's marker
+        // that are themselves list items become the item's child list.
+        // Deeper indentation than that flattens into the child, which is the
+        // right failure mode for prose that was never meant to be an outline.
+        const nested: string[] = [];
+        while (i < lines.length) {
+          const nm = lines[i].match(UL_RE) ?? lines[i].match(OL_RE);
+          if (nm && nm[1].length > baseIndent) {
+            nested.push(lines[i].slice(nm[1].length));
+            i++;
+            continue;
+          }
+          // A continuation line (indented, not a marker) joins the item, or
+          // the nested list if one has started.
+          if (lines[i].trim() && /^\s+/.test(lines[i]) && !isBlockStart(lines[i].trim())) {
+            if (nested.length) nested.push(lines[i].trim());
+            else body = `${body}\n${lines[i].trim()}`;
+            i++;
+            continue;
+          }
+          break;
+        }
+        const children = nested.length ? parse(nested.join("\n"))[0] : undefined;
+        items.push(children ? { body, children } : { body });
+      }
+      blocks.push(ordered ? { t: "ol", items, start } : { t: "ul", items });
       continue;
     }
 
@@ -88,17 +203,20 @@ function parse(src: string): Block[] {
     }
 
     const para: string[] = [];
-    while (
-      i < lines.length &&
-      lines[i].trim() &&
-      !/^```/.test(lines[i]) &&
-      !/^\s*[-*]\s+/.test(lines[i]) &&
-      !/^\s*\d+\.\s+/.test(lines[i]) &&
-      !/^#{1,4}\s/.test(lines[i])
-    ) {
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) {
+      // A table can begin on the line after a paragraph without a blank line.
+      if (
+        para.length &&
+        lines[i].includes("|") &&
+        i + 1 < lines.length &&
+        TABLE_SEP_RE.test(lines[i + 1])
+      ) {
+        break;
+      }
       para.push(lines[i++]);
     }
-    blocks.push({ t: "p", body: para.join("\n") });
+    if (para.length) blocks.push({ t: "p", body: para.join("\n") });
+    else i++;
   }
 
   return blocks;
@@ -108,7 +226,7 @@ function parse(src: string): Block[] {
  * The gap above a block, given what precedes it.
  *
  * Three rules, in order:
- *   1. Nothing above the first block — the answer starts at the node's line.
+ *   1. Nothing above the first block: the answer starts at the node's line.
  *   2. A heading owns the block beneath it: whatever follows hugs it at 8px,
  *      so the pair reads as one unit rather than two floating rows.
  *   3. Otherwise the gap comes from what is arriving. A new heading opens a
@@ -125,6 +243,8 @@ function topMargin(prev: Block | undefined, cur: Block): string {
     case "ul":
     case "ol":
       return "mt-3";
+    case "hr":
+      return "mt-6";
     default:
       return "mt-4";
   }
@@ -137,13 +257,65 @@ const HEADING_CLASS: Record<number, string> = {
   4: "text-[1rem]",
 };
 
-/** Inline: `code`, **bold**, *italic*. Rendered as React nodes, never HTML. */
+/** Only these schemes render as links; anything else is left as text. */
+function safeHref(raw: string): string | null {
+  const url = raw.trim().replace(/^<|>$/g, "");
+  if (/^https?:\/\//i.test(url)) return url;
+  if (/^mailto:[^\s]+@[^\s]+$/i.test(url)) return url;
+  return null;
+}
+
+function ExternalGlyph() {
+  return (
+    <svg
+      aria-hidden
+      width="0.75em"
+      height="0.75em"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="ml-[0.2em] inline-block -translate-y-[0.1em] opacity-60"
+    >
+      <path d="M14 4h6v6M20 4l-9 9M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" />
+    </svg>
+  );
+}
+
+/**
+ * Inline: `code`, **bold**, *italic*, ~~struck~~, [links](url) and bare URLs.
+ * Rendered as React nodes, never HTML.
+ */
 function inline(text: string, keyBase: string): React.ReactNode[] {
   const out: React.ReactNode[] = [];
-  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\n]+\*)/g;
+  const re =
+    /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(~~[^~]+~~)|(\[[^\]\n]+\]\([^)\s]+(?:\s+"[^"]*")?\))|(<?https?:\/\/[^\s<>)\]]+>?)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let k = 0;
+
+  const link = (label: React.ReactNode[], raw: string) => {
+    const href = safeHref(raw);
+    if (!href) {
+      out.push(...label);
+      return;
+    }
+    out.push(
+      <a
+        key={`${keyBase}-a${k++}`}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="break-words text-accent underline decoration-accent/40 underline-offset-[0.2em]
+                   transition-colors duration-200 hover:decoration-accent"
+      >
+        {label}
+        <ExternalGlyph />
+      </a>,
+    );
+  };
 
   while ((m = re.exec(text))) {
     if (m.index > last) out.push(text.slice(last, m.index));
@@ -151,25 +323,39 @@ function inline(text: string, keyBase: string): React.ReactNode[] {
     if (tok.startsWith("`")) {
       out.push(
         // Neutral, not accent. Inline code is the most frequent span in an
-        // agent's prose — every path, flag and identifier is one — and
-        // painting all of them in the section accent spent the app's single
-        // loudest colour on its most common element. A tinted well with a
-        // hairline separates it from the prose just as clearly, and leaves the
-        // accent meaning something when it does appear.
+        // agent's prose, and painting all of them in the section accent spent
+        // the app's single loudest colour on its most common element.
         <code
           key={`${keyBase}-c${k++}`}
-          className="rounded-[5px] border border-white/[0.07] bg-white/[0.055]
+          className="rounded-inner border border-white/[0.07] bg-white/[0.055]
                      px-[0.35em] py-[0.1em] font-mono text-[0.855em] text-ink/90"
         >
           {tok.slice(1, -1)}
         </code>,
       );
-    } else if (tok.startsWith("**")) {
+    } else if (tok.startsWith("**") || tok.startsWith("__")) {
       out.push(
         <strong key={`${keyBase}-b${k++}`} className="font-semibold text-ink">
-          {tok.slice(2, -2)}
+          {inline(tok.slice(2, -2), `${keyBase}-b${k}`)}
         </strong>,
       );
+    } else if (tok.startsWith("~~")) {
+      out.push(
+        <s key={`${keyBase}-s${k++}`} className="text-ink-muted">
+          {tok.slice(2, -2)}
+        </s>,
+      );
+    } else if (tok.startsWith("[")) {
+      const close = tok.indexOf("](");
+      const label = tok.slice(1, close);
+      const target = tok.slice(close + 2, -1).replace(/\s+"[^"]*"$/, "");
+      link(inline(label, `${keyBase}-l${k}`), target);
+    } else if (/^<?https?:/i.test(tok)) {
+      // A bare URL. Trailing punctuation belongs to the sentence, not the link.
+      const trimmed = tok.replace(/^<|>$/g, "").replace(/[.,;:!?]+$/, "");
+      const rest = tok.replace(/^<|>$/g, "").slice(trimmed.length);
+      link([trimmed], trimmed);
+      if (rest) out.push(rest);
     } else {
       out.push(
         <em key={`${keyBase}-i${k++}`} className="italic">
@@ -183,23 +369,24 @@ function inline(text: string, keyBase: string): React.ReactNode[] {
   return out;
 }
 
-export function Markdown({ source }: { source: string }) {
-  const blocks = useMemo(() => parse(source), [source]);
+const ALIGN: Record<"l" | "c" | "r", string> = {
+  l: "text-left",
+  c: "text-center",
+  r: "text-right",
+};
 
+function Blocks({ blocks, keyBase }: { blocks: Block[]; keyBase: string }) {
   return (
-    // `voice-agent` is the widest, airiest voice in the type system — this is
-    // the agent talking, and it is meant to read differently from what the
-    // user said and from anything the machine printed.
-    <div className="voice-agent">
+    <>
       {blocks.map((b, idx) => {
-        const key = `b${idx}`;
+        const key = `${keyBase}b${idx}`;
         const gap = topMargin(blocks[idx - 1], b);
 
         switch (b.t) {
           case "code":
             return (
               <div key={key} className={gap}>
-                {/* `maxHeight: none` — a chat answer should flow. Capping the
+                {/* `maxHeight: none`: a chat answer should flow. Capping the
                     block puts a second scrollbar inside a surface that is
                     already scrolling, which is the one thing neither reference
                     product does. */}
@@ -227,17 +414,72 @@ export function Markdown({ source }: { source: string }) {
             );
           }
 
+          case "hr":
+            return <hr key={key} className={`${gap} border-0 border-t border-line`} />;
+
+          case "quote":
+            return (
+              <blockquote
+                key={key}
+                className={`${gap} border-l-2 border-line-strong pl-4 text-ink-muted`}
+              >
+                <Blocks blocks={b.blocks} keyBase={`${key}-q`} />
+              </blockquote>
+            );
+
+          case "table":
+            return (
+              // Its own horizontal scroll container, so a wide table never
+              // moves the page sideways; the transcript stays put at 320px.
+              <div key={key} className={`${gap} scroll-thin -mx-1 overflow-x-auto px-1`}>
+                <table className="w-max min-w-full border-collapse text-[0.9375rem] leading-[1.5]">
+                  <thead>
+                    <tr>
+                      {b.head.map((cell, c) => (
+                        <th
+                          key={c}
+                          scope="col"
+                          className={`voice-label whitespace-nowrap border-b border-line-strong
+                                      px-3 py-2 align-bottom font-medium text-ink-muted ${ALIGN[b.align[c] ?? "l"]}`}
+                        >
+                          {inline(cell, `${key}-h${c}`)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {b.rows.map((row, r) => (
+                      <tr key={r} className="border-b border-line last:border-b-0">
+                        {b.head.map((_, c) => (
+                          <td
+                            key={c}
+                            className={`px-3 py-2 align-top ${ALIGN[b.align[c] ?? "l"]}`}
+                            style={{ fontVariantNumeric: "tabular-nums" }}
+                          >
+                            {inline(row[c] ?? "", `${key}-r${r}c${c}`)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            );
+
           case "ul":
             return (
               <ul key={key} className={`${gap} space-y-1.5`}>
                 {b.items.map((it, j) => (
                   <li key={j} className="flex gap-2.5">
                     {/* 0.72em drops the 4px dot onto the optical centre of a
-                        16px/1.72 line. It used to sit at 0.55em — about 3px
-                        high, which on a bulleted list of any length reads as
-                        the bullets floating off their text. */}
+                        16px/1.72 line. */}
                     <span className="mt-[0.72em] h-1 w-1 shrink-0 rounded-full bg-ink-faint" />
-                    <span className="min-w-0">{inline(it, `${key}-${j}`)}</span>
+                    <span className="min-w-0 flex-1">
+                      {inline(it.body, `${key}-${j}`)}
+                      {it.children && (
+                        <Blocks blocks={[it.children]} keyBase={`${key}-${j}-n`} />
+                      )}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -252,9 +494,14 @@ export function Markdown({ source }: { source: string }) {
                       className="w-4 shrink-0 pt-[0.1em] text-right font-mono text-xs text-ink-faint"
                       style={{ fontVariantNumeric: "tabular-nums" }}
                     >
-                      {j + 1}.
+                      {b.start + j}.
                     </span>
-                    <span className="min-w-0">{inline(it, `${key}-${j}`)}</span>
+                    <span className="min-w-0 flex-1">
+                      {inline(it.body, `${key}-${j}`)}
+                      {it.children && (
+                        <Blocks blocks={[it.children]} keyBase={`${key}-${j}-n`} />
+                      )}
+                    </span>
                   </li>
                 ))}
               </ol>
@@ -262,12 +509,25 @@ export function Markdown({ source }: { source: string }) {
 
           default:
             return (
-              <p key={key} className={`${gap} whitespace-pre-wrap`}>
+              <p key={key} className={`${gap} whitespace-pre-wrap break-words`}>
                 {inline(b.body, key)}
               </p>
             );
         }
       })}
+    </>
+  );
+}
+
+export function Markdown({ source }: { source: string }) {
+  const blocks = useMemo(() => parse(source), [source]);
+
+  return (
+    // `voice-agent` is the widest, airiest voice in the type system: this is
+    // the agent talking, and it is meant to read differently from what the
+    // user said and from anything the machine printed.
+    <div className="voice-agent">
+      <Blocks blocks={blocks} keyBase="" />
     </div>
   );
 }

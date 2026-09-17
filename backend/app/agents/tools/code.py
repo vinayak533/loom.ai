@@ -6,11 +6,14 @@
                concatenation in a loop, a linear scan over a list where a set
                would do, a bare `except`). Python only, and it says so for
                anything else rather than pretending.
-    lint_code  REAL. Runs an actual linter — `ruff` or `pyflakes` for Python,
+    lint_code  REAL. Runs an actual linter — `ruff` for Python (installed into
+               the sandbox on first use, since the base image has none),
                `node --check` for JavaScript — inside the session's E2B sandbox,
-               the same one the Code section uses. Falls back to Python's own
-               `compile()` for a real syntax check when no sandbox is available,
-               so the tool still reports something true rather than nothing.
+               the same one the Code section uses. When no sandbox and no
+               linter can be had it falls back to Python's own `compile()` for
+               a real syntax check, and says in the result that it is a syntax
+               check only — a smaller true answer, never a "clean" that was
+               never earned.
     run_code   REAL. Executes in that same E2B sandbox and returns real stdout,
                stderr and exit code. No simulation; if the sandbox is
                unavailable it says the refactor is unverified.
@@ -39,10 +42,23 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "extension": "py",
         "run": "python3 {file}",
         # Ordered by preference; the first one present in the sandbox wins.
+        #
+        # `py_compile` used to sit at the end of this chain and it was a lie by
+        # omission. Neither ruff nor pyflakes ships in the E2B image, so every
+        # Python lint fell through to it — and `py_compile` only parses. It
+        # exits 0 for an unused import, an undefined name, a shadowed builtin,
+        # anything at all that is syntactically valid, and the tool then
+        # reported `clean: true` with no `degraded` flag. The agent read that as
+        # "linted, no findings" and said so in its audit.
+        #
+        # It is gone, and `_ensure_python_linter` installs ruff so the first
+        # entry is usually real. If that install cannot happen, the chain now
+        # ends empty and falls through to `_local_fallback`, which does the same
+        # syntax-only check but *says* it is syntax-only and tells the agent to
+        # disclose that the style and correctness rules were never run.
         "lint": [
             ("ruff", "ruff check --no-cache --output-format concise {file}"),
             ("pyflakes", "python3 -m pyflakes {file}"),
-            ("compileall", "python3 -m py_compile {file}"),
         ],
     },
     "javascript": {
@@ -319,7 +335,8 @@ class _FunctionVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Compare(self, node: ast.Compare) -> None:
-        for op, comparator in zip(node.ops, node.comparators):
+        # A `Compare` node always has one comparator per operator.
+        for op, comparator in zip(node.ops, node.comparators, strict=True):
             if isinstance(op, (ast.Eq, ast.NotEq)) and isinstance(
                 comparator, ast.Constant
             ) and comparator.value is None:
@@ -504,6 +521,15 @@ async def lint_code(ctx: ToolContext, args: dict) -> ToolResult:
     except Exception as exc:  # noqa: BLE001
         return _local_fallback(code, language, f"could not write to the sandbox ({exc})")
 
+    # The linter is expected to come from the sandbox *template* (see
+    # `backend/sandbox/e2b.Dockerfile`, which pins ruff into the image). The
+    # runtime install below is an opt-in for deployments that cannot build one,
+    # and it is off by default: a `pip install` inside a user's live sandbox is
+    # an undocumented change to what that session can do, made at the moment a
+    # tool happens to need it, and it cannot be reproduced from the repository.
+    if language == "python" and get_settings().sandbox_runtime_linter_install:
+        await _ensure_python_linter(ctx.session_id, sandbox)
+
     for name, template in spec["lint"]:
         command = template.format(file=shlex.quote(path))
         stdout, stderr, exit_code, ran = await _run_in_sandbox(sandbox, command)
@@ -529,8 +555,56 @@ async def lint_code(ctx: ToolContext, args: dict) -> ToolResult:
         )
 
     return _local_fallback(
-        code, language, f"no linter for {language} is installed in the sandbox image"
+        code,
+        language,
+        f"no linter for {language} is installed in the sandbox image — build the "
+        "template in backend/sandbox/ and set E2B_TEMPLATE, or set "
+        "SANDBOX_RUNTIME_LINTER_INSTALL=1 to install one at first use",
     )
+
+
+#: Sandboxes that have already been offered ruff, so the install is attempted
+#: once per sandbox rather than once per lint. Keyed by *sandbox* id and not by
+#: session: a session outlives its sandbox — the reaper kills an idle one and
+#: the next call gets a fresh image with no ruff in it — and keying by session
+#: would skip the install for the rest of that session.
+#:
+#: A failed attempt is recorded too. An image with no network, or no pip, will
+#: not grow one on the second try, and paying that discovery on every call
+#: would make the tool slowest in exactly the situation it is already degraded
+#: in.
+_RUFF_READY: set[str] = set()
+
+
+async def _ensure_python_linter(session_id: str, sandbox) -> None:
+    """Put a real linter in the sandbox, once, before the first Python lint.
+
+    Only reached when `SANDBOX_RUNTIME_LINTER_INSTALL` is on. The E2B base
+    image has no ruff and no pyflakes, so on that image without either this or
+    the project template the whole Python chain misses and every lint degrades.
+    `pip install ruff` is a few seconds on a warm sandbox and it is what turns
+    this tool from a syntax check that claims to be a lint into an actual lint
+    — but the template is the supported way to get there; this is the fallback.
+
+    Best-effort by design: nothing here raises, and nothing here reports. If
+    the install does not happen the chain simply misses and `_local_fallback`
+    gives the honest degraded answer it was always supposed to give.
+    """
+    key = getattr(sandbox, "sandbox_id", None) or session_id
+    if key in _RUFF_READY:
+        return
+    _RUFF_READY.add(key)
+    try:
+        stdout, stderr, code, ran = await _run_in_sandbox(
+            sandbox, "python3 -m pip install --quiet --disable-pip-version-check ruff"
+        )
+        if not ran or code != 0:
+            log.info(
+                "Could not install ruff into the sandbox for %s (exit %s): %s",
+                session_id, code, (stderr or stdout or "").strip()[:200],
+            )
+    except Exception:  # noqa: BLE001 - a linter install must not fail a lint
+        log.debug("ruff install raised for %s", session_id, exc_info=True)
 
 
 def _local_fallback(code: str, language: str, reason: str) -> ToolResult:

@@ -54,12 +54,15 @@ from app.llm_router import (
     model_meta,
     stream_with_fallback,
 )
-from app.tools.impl import run_tool
+from app.tools.impl import ToolResult, run_tool
 from app.credits import charge_llm
 from app.turnstop import (
     STOPPED_TOOL_TEXT,
     approx_tokens,
+    broken_arguments,
+    close_stream,
     partial_assistant_content,
+    prompt_text,
     stopped_result_block,
 )
 from app.tools.schemas import LIST_FILES, READ_FILE, TOOL_NODE, TOOLS, WEB_SEARCH
@@ -345,7 +348,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
                 # scope leaves the connection to the garbage collector, which
                 # on a stopped generation means the provider keeps producing
                 # (and charging for) tokens nobody will read.
-                await _close_stream(stream)
+                await close_stream(stream)
         else:
             async for se in stream:
                 if se.kind == "text_delta":
@@ -356,7 +359,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
                     stopped = True
                     break
             if stopped:
-                await _close_stream(stream)
+                await close_stream(stream)
     except ModelUnavailableError as exc:
         if emitter:
             emitter.emit(ev.error(f"Model unavailable: {exc}"))
@@ -444,7 +447,7 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict:
         # for tokens that were produced — which would make Stop a way to use
         # the product for free.
         est = {
-            "input_tokens": approx_tokens(_prompt_text(messages[:-1])),
+            "input_tokens": approx_tokens(prompt_text(messages[:-1])),
             "output_tokens": approx_tokens(partial_text + partial_thinking),
         }
         cost = estimate_cost(answered_by, est)
@@ -637,7 +640,15 @@ async def _execute_call(
         )
     )
 
-    result = await run_tool(name, session_id, args, call_id, emitter)
+    # Before dispatch, not inside the tool: every tool reads its own arguments
+    # and each one would have to grow the same guard, with a different wrong
+    # default to defend against.
+    broken = broken_arguments(name, args)
+    if broken is not None:
+        log.warning("Refusing unparseable `%s` call in session %s", name, session_id)
+        result = ToolResult(broken, False)
+    else:
+        result = await run_tool(name, session_id, args, call_id, emitter)
 
     if emitter:
         for side in result.events:
@@ -716,7 +727,10 @@ async def _execute_batch(
         return_exceptions=True,
     )
     out: list[dict] = []
-    for block, result in zip(pending, results):
+    # `strict`: `results` is one gather over `pending`, so a length
+    # mismatch is impossible unless that changes — in which case a loud
+    # failure beats silently dropping the tail of a tool batch.
+    for block, result in zip(pending, results, strict=True):
         if isinstance(result, asyncio.CancelledError):
             raise result  # the run was cancelled; let it unwind
         if isinstance(result, BaseException):
@@ -809,47 +823,3 @@ def build_user_message(text: str, blocks: list[dict] | None = None) -> dict:
 
 def summarise_for_log(message: dict) -> str:
     return json.dumps(message)[:400]
-
-
-async def _close_stream(stream) -> None:
-    """Close a provider stream that is being abandoned mid-flight.
-
-    Async generators expose `aclose()`; anything else is left alone rather than
-    guessed at. Failures are swallowed on purpose — the turn is already ending
-    and a teardown error is not worth surfacing over the answer the user is
-    reading.
-    """
-    close = getattr(stream, "aclose", None)
-    if close is None:
-        return
-    try:
-        await close()
-    except Exception:  # noqa: BLE001
-        log.debug("Stream close failed on stop", exc_info=True)
-
-
-def _prompt_text(messages: list[dict]) -> str:
-    """Every piece of text in the prompt, for estimating input tokens.
-
-    Only used on the stopped path, where the provider never reported real
-    usage. Image and document blocks are skipped: their token cost is not a
-    function of any text they carry, and guessing at it would be worse than
-    the small under-count of leaving them out.
-    """
-    parts: list[str] = []
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, str):
-            parts.append(content)
-            continue
-        for block in content or []:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") in ("text", "reasoning", "thinking"):
-                parts.append(str(block.get("text") or ""))
-            elif block.get("type") == "tool_result":
-                inner = block.get("content")
-                parts.append(inner if isinstance(inner, str) else json.dumps(inner))
-            elif block.get("type") == "tool_use":
-                parts.append(json.dumps(block.get("input") or {}))
-    return "\n".join(parts)

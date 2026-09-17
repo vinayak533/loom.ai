@@ -241,7 +241,7 @@ print("\n6. Sessions stored against a removed model recover")
 for stale, label in (("llama-70b", "Llama 3.3 70B"), ("claude-sonnet", "Claude Sonnet")):
     mid, notice = R.resolve_stored_model(stale)
     check(f"`{stale}` is reassigned to the default", mid == default, mid)
-    check(f"and the notice names it properly, not as a raw slug",
+    check("and the notice names it properly, not as a raw slug",
           bool(notice) and label in (notice or "") and stale not in (notice or ""),
           notice or "")
 # A removed *vendor* is deliberately NOT in RETIRED_DISPLAY_NAMES: naming it in

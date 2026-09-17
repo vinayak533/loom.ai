@@ -255,7 +255,7 @@ export const AttachMenu = forwardRef<AttachMenuHandle, {
         disabled={disabled || busy}
         aria-label="Add to this session"
         aria-expanded={open}
-        title="Add folder, files, or a document"
+        data-tip="Add folder, files, or a document"
         className={cn(
           // Sized and toned to match the model selector standing right next to
           // it: these two are the composer's controls, at the same rank, and
@@ -265,7 +265,7 @@ export const AttachMenu = forwardRef<AttachMenuHandle, {
           // surface rather than the 5.3:1 it gets on the page's black — faint
           // enough that the glyph read as disabled. `ink-muted` is the tone
           // every control of this prominence already uses, and lands at 8.3:1.
-          "grid h-9 w-9 shrink-0 place-items-center rounded-ctl transition-all duration-200",
+          "grid h-9 w-9 shrink-0 place-items-center rounded-ctl transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
           // 36px reads right beside the model chip with a mouse; a finger
           // needs 44. See the `touch` screen in tailwind.config.ts.
           "touch:h-11 touch:w-11",
@@ -310,8 +310,14 @@ export const AttachMenu = forwardRef<AttachMenuHandle, {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={motionOK ? { opacity: 0, y: 6, scale: 0.98 } : { opacity: 0 }}
             transition={motionOK ? SPRING_SNAP : { duration: 0 }}
-            className="glass absolute bottom-full left-0 z-50 mb-2 w-[16.5rem] overflow-hidden
-                       rounded-panel p-1.5 shadow-lift"
+            // `bg-elevated-solid`, not `glass`. `glass` is `bg-elevated` —
+            // 7% white — which is right for a panel sitting on the page's own
+            // quiet ground and wrong for a menu that opens *on top of the
+            // composer*: the placeholder text underneath read straight through
+            // it, and the backdrop blur cannot rescue 7% alpha over live text.
+            // A menu is a surface you read, so it gets an opaque one.
+            className="absolute bottom-full left-0 z-50 mb-2 w-[16.5rem] overflow-hidden
+                       rounded-panel border border-line bg-elevated-solid p-1.5 shadow-lift"
           >
             {sandbox && (
             <MenuItem
@@ -368,7 +374,14 @@ export const AttachMenu = forwardRef<AttachMenuHandle, {
             animate={{ opacity: 1, y: 0 }}
             exit={motionOK ? { opacity: 0, y: 4 } : { opacity: 0 }}
             transition={motionOK ? SPRING_SNAP : { duration: 0 }}
-            className="glass absolute bottom-full left-0 z-40 mb-2 w-[19rem] rounded-panel px-3 py-2.5"
+            // Opaque, for the same reason the menu above it is: this popover
+            // opens in the same place — directly over the composer — and this
+            // is the surface the Code section shows for the whole length of a
+            // folder import, so it is the one a user actually sits and reads.
+            // At `glass`'s 7% white the placeholder underneath showed through
+            // the progress line.
+            className="absolute bottom-full left-0 z-40 mb-2 w-[19rem] rounded-panel
+                       border border-line bg-elevated-solid px-3 py-2.5 shadow-lift"
           >
             <ProgressBody
               phase={phase}
@@ -448,13 +461,19 @@ function MenuItem({
         strokeWidth="1.7"
         strokeLinecap="round"
         strokeLinejoin="round"
-        className="shrink-0 text-ink-faint"
+        // `ink-muted`, not `ink-faint`. Measured on the rendered menu: the
+        // icon and hint were #7B808C on the menu's composited ground, which is
+        // 3.56:1 — under AA's 4.5:1, and the hint is 11px, so it was the
+        // smallest text in the component at the lowest contrast in it. This is
+        // the "too light to see" the whole control was reported for.
+        // `ink-muted` on the same ground measures 6.27:1.
+        className="shrink-0 text-ink-muted"
       >
         {icon}
       </svg>
       <span className="flex min-w-0 flex-col leading-tight">
         <span className="truncate font-sans text-[0.8125rem] text-ink">{label}</span>
-        <span className="truncate text-[11px] text-ink-faint">{hint}</span>
+        <span className="truncate text-[11px] text-ink-muted">{hint}</span>
       </span>
     </button>
   );
@@ -617,8 +636,12 @@ function Row({
         {detail && (
           <p
             className={cn(
+              // `ink-muted`, not `ink-faint`, and full-strength `del` rather
+              // than `del/85`. This is the line carrying the actual
+              // information — "12 of 40 files", the reason an import failed —
+              // at 11px, and it was the lowest-contrast text in the popover.
               "mt-0.5 break-words text-[11px] leading-snug",
-              tone === "error" ? "text-del/85" : "text-ink-faint",
+              tone === "error" ? "text-del" : "text-ink-muted",
             )}
           >
             {detail}
@@ -629,7 +652,7 @@ function Row({
             key={n.text}
             className={cn(
               "mt-1 text-[11px] leading-snug",
-              n.tone === "warn" ? "text-warn" : "text-ink-faint",
+              n.tone === "warn" ? "text-warn" : "text-ink-muted",
             )}
           >
             {n.text}
@@ -659,7 +682,7 @@ function Row({
               type="button"
               onClick={action.onClick}
               aria-label={action.label}
-              className="grid h-[18px] w-[18px] place-items-center rounded text-ink-faint
+              className="grid h-[18px] w-[18px] place-items-center rounded text-ink-muted
                          transition-colors duration-200 hover:text-ink"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
@@ -670,7 +693,10 @@ function Row({
             <button
               type="button"
               onClick={action.onClick}
-              className="rounded text-[11px] font-medium text-ink-faint
+              // Cancel is the only way to stop a long import. A control at
+              // 3.6:1 reads as disabled, which is the worst thing it could
+              // say about itself while forty files are uploading.
+              className="rounded text-[11px] font-medium text-ink-muted
                          transition-colors duration-200 hover:text-ink"
             >
               {action.label}

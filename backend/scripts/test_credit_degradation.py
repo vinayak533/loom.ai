@@ -69,6 +69,7 @@ class FakeTable:
         self._filters: dict[str, object] = {}
         self._payload = None
         self._op = None
+        self._ignore_duplicates = False
 
     # -- query building (only the shapes credits.py actually uses) ---------
     def select(self, *_a, **_kw):
@@ -79,8 +80,14 @@ class FakeTable:
         self._op, self._payload = "insert", payload
         return self
 
-    def upsert(self, payload):
+    def upsert(self, payload, ignore_duplicates: bool = False, **_kw):
+        # `ignore_duplicates` is the real client's `ON CONFLICT DO NOTHING`, and
+        # `credits.get_balance` passes it when it creates an account — so a
+        # double that did not accept it raised `TypeError` inside `_safe`, which
+        # read as the store being down and degraded the meter before this
+        # suite's first assertion.
         self._op, self._payload = "upsert", payload
+        self._ignore_duplicates = ignore_duplicates
         return self
 
     def update(self, payload):
@@ -118,16 +125,25 @@ class FakeTable:
         payloads = self._payload if isinstance(self._payload, list) else [self._payload]
 
         if self._op in {"insert", "upsert"}:
+            written = []
             for row in payloads:
                 key = row.get("user_id") if self.name == "user_credits" else row.get("id")
-                if self._op == "insert" and key in rows:
-                    raise Down(f"duplicate key {key}")
+                if key in rows:
+                    if self._op == "insert":
+                        raise Down(f"duplicate key {key}")
+                    if self._ignore_duplicates:
+                        # ON CONFLICT DO NOTHING: the row stands, and PostgREST
+                        # returns nothing — which is the signal `get_balance`
+                        # reads to know it did not create the account and must
+                        # not claim the opening grant.
+                        continue
                 rows[key] = dict(row)
-            return type("Res", (), {"data": payloads})()
+                written.append(row)
+            return type("Res", (), {"data": written})()
 
         if self._op == "update":
             touched = []
-            for key, row in rows.items():
+            for row in rows.values():
                 if all(row.get(k) == v for k, v in self._filters.items()):
                     row.update(payloads[0])
                     touched.append(row)

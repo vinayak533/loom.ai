@@ -123,7 +123,7 @@ export const DiffViewer = memo(function DiffViewer({
       {/* A stat strip, not a title bar. The host — the context column's face
           tabs — already names the file and owns dismissal, so repeating either
           here would be chrome for its own sake. */}
-      <header className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2.5">
+      <header className="flex h-bar-sub shrink-0 items-center gap-3 border-b border-line px-3.5">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <span
             className={cn(
@@ -139,7 +139,7 @@ export const DiffViewer = memo(function DiffViewer({
           {stats.removed > 0 && (
             <span className="voice-machine text-del">−{stats.removed}</span>
           )}
-          <span className="voice-machine truncate text-ink-faint" title={file.path}>
+          <span className="voice-machine truncate text-ink-faint" data-tip={file.path}>
             {shortPath(file.path, root)}
           </span>
         </div>
@@ -177,7 +177,7 @@ export const DiffViewer = memo(function DiffViewer({
           <button
             type="button"
             onClick={() => onCommitFile(file.path)}
-            title="Commit this change"
+            data-tip="Commit this change"
             className="shrink-0 rounded-ctl border border-line px-2 py-1 text-2xs
                        text-ink-faint transition-colors duration-200
                        hover:border-accent/40 hover:text-accent"

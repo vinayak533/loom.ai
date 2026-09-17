@@ -26,7 +26,7 @@ from typing import Any
 
 import httpx
 
-from app.agents.tools.base import ToolContext, ToolResult, artifact, as_json, not_configured
+from app.agents.tools.base import ToolContext, ToolResult, as_json, not_configured
 from app.config import get_settings
 
 log = logging.getLogger(__name__)
@@ -186,19 +186,54 @@ _ALL_CAPS_RE = re.compile(r"\b[A-Z]{3,}\b")
 _EXCLAIM_RE = re.compile(r"!")
 
 
+#: Every phrase with its category, longest first. The order is the whole point:
+#: the list contains phrases that nest inside each other — `free` inside
+#: `100% free` inside `risk free` — and one occurrence of the longer phrase
+#: must be reported once, as the longer phrase, rather than once for each
+#: fragment it happens to contain.
+#:
+#: Built at import rather than per call: it is a fixed ~90-entry sort over a
+#: constant, and `score_subject_line` calls `_find_spam` on every subject.
+_SPAM_PHRASES: list[tuple[str, str]] = sorted(
+    ((phrase, category) for category, phrases in SPAM_WORDS.items() for phrase in phrases),
+    key=lambda pair: len(pair[0]),
+    reverse=True,
+)
+
+
 def _find_spam(text: str) -> list[dict[str, Any]]:
+    """Trigger phrases in ``text``, counted once per occurrence.
+
+    Longest phrase first, and each match consumes its span so no shorter phrase
+    can match inside it. Without that, "100% FREE" flagged twice — once for
+    `100% free` and once for `free` — from a single occurrence. That count is
+    not cosmetic: it is what `check_spam_words` compares against its severity
+    thresholds, so a handful of nested phrases pushed an ordinary email to
+    `severity: high` on the strength of words it had only used once.
+    """
     lowered = text.lower()
+    #: Character spans already claimed by a longer phrase.
+    claimed: list[tuple[int, int]] = []
     hits: list[dict[str, Any]] = []
-    for category, phrases in SPAM_WORDS.items():
-        for phrase in phrases:
-            # Word boundaries on both ends. Multi-word phrases keep their
-            # internal spacing, so "act now" matches only as a phrase.
-            pattern = r"\b" + re.escape(phrase) + r"\b"
-            found = list(re.finditer(pattern, lowered))
-            if found:
-                hits.append(
-                    {"phrase": phrase, "category": category, "occurrences": len(found)}
-                )
+
+    for phrase, category in _SPAM_PHRASES:
+        # Word boundaries on both ends. Multi-word phrases keep their internal
+        # spacing, so "act now" matches only as a phrase.
+        pattern = r"\b" + re.escape(phrase) + r"\b"
+        spans = [
+            m.span()
+            for m in re.finditer(pattern, lowered)
+            if not any(start < m.end() and m.start() < end for start, end in claimed)
+        ]
+        if spans:
+            claimed.extend(spans)
+            hits.append(
+                {"phrase": phrase, "category": category, "occurrences": len(spans)}
+            )
+
+    # Back into the order a reader expects — where the phrase sits in the text,
+    # not how long it is.
+    hits.sort(key=lambda h: lowered.find(h["phrase"]))
     return hits
 
 

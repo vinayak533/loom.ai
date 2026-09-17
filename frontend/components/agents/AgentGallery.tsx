@@ -3,7 +3,8 @@
 import { motion } from "framer-motion";
 import { useMemo, useState } from "react";
 import type { AgentSummary, CreditBalance } from "@/lib/agents";
-import { formatCredits } from "@/lib/agents";
+import { formatCredits, groupAgents } from "@/lib/agents";
+import { SkeletonCard } from "../Skeleton";
 import { cn } from "@/lib/cn";
 import { SPRING_SNAP, useMotionOK } from "../Anim";
 import { AgentIcon } from "./AgentIcon";
@@ -118,16 +119,19 @@ export function AgentGallery({
         {loading && agents.length === 0 && (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {Array.from({ length: 6 }).map((_, i) => (
-              <div
-                key={i}
-                className="h-[170px] animate-pulse rounded-card border border-line bg-surface"
-              />
+              <SkeletonCard key={i} className="h-[170px]" />
             ))}
           </div>
         )}
 
+        {/* Grouped by the kind of work rather than shown as ten peers: the
+            question a new user arrives with is "what am I trying to do", and
+            a heading answers it before a card has to. */}
+        {groupAgents(filtered).map((group) => (
+        <section key={group.label} className="mb-7 last:mb-0">
+          <h2 className="voice-label mb-3">{group.label}</h2>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {filtered.map((agent, i) => (
+          {group.agents.map((agent, i) => (
             <motion.button
               key={agent.id}
               type="button"
@@ -141,7 +145,7 @@ export function AgentGallery({
               }
               className={cn(
                 "group relative flex flex-col gap-2.5 overflow-hidden rounded-card border",
-                "border-line bg-surface p-4 text-left transition-all duration-200",
+                "border-line bg-surface p-4 text-left transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
                 "hover:border-line-strong hover:bg-elevated active:scale-[0.99]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-ring",
               )}
@@ -177,7 +181,7 @@ export function AgentGallery({
                   <p
                     className="voice-label mt-1 truncate"
                     style={{ color: agent.accent }}
-                    title={agent.role}
+                    data-tip={agent.role}
                   >
                     {agent.role}
                   </p>
@@ -193,7 +197,7 @@ export function AgentGallery({
                 {agent.tools.map((tool) => (
                   <span
                     key={tool.name}
-                    title={
+                    data-tip={
                       tool.configured
                         ? `${tool.summary}${
                             tool.credit_surcharge
@@ -203,7 +207,7 @@ export function AgentGallery({
                         : `Not configured — ${tool.requires_key} is unset. ${tool.without_it ?? ""}`
                     }
                     className={cn(
-                      "rounded-[5px] border px-1.5 py-0.5 font-mono text-[0.5625rem] leading-[1.5]",
+                      "rounded-inner border px-1.5 py-0.5 font-mono text-2xs leading-[1.5]",
                       tool.configured
                         ? "border-line text-ink-faint"
                         : "border-warn/40 text-warn line-through decoration-warn/50",
@@ -215,9 +219,9 @@ export function AgentGallery({
                 {agent.reasoning_tools.map((tool) => (
                   <span
                     key={tool.name}
-                    title={`Prompt-engineered, not a callable tool. ${tool.note}`}
-                    className="rounded-[5px] border border-dashed border-line px-1.5 py-0.5
-                               font-mono text-[0.5625rem] leading-[1.5] text-ink-dim"
+                    data-tip={`Prompt-engineered, not a callable tool. ${tool.note}`}
+                    className="rounded-inner border border-transparent bg-white/[0.05] px-1.5 py-0.5
+                               font-mono text-2xs leading-[1.5] text-ink-subtle"
                   >
                     {tool.name}
                   </span>
@@ -226,6 +230,8 @@ export function AgentGallery({
             </motion.button>
           ))}
         </div>
+        </section>
+        ))}
 
         {!loading && filtered.length === 0 && agents.length > 0 && (
           <p className="py-10 text-center font-sans text-[0.8125rem] text-ink-faint">
@@ -234,15 +240,16 @@ export function AgentGallery({
         )}
 
         {/* Stated once, at the foot of the grid, rather than repeated on every
-            card: solid outline is a real function, dashed is a reasoning step
-            the persona performs. Making that legible was an explicit ask. */}
-        <p className="mt-7 font-sans text-2xs leading-relaxed text-ink-faint">
-          <span className="mr-1.5 inline-block rounded-[5px] border border-line px-1.5 py-0.5 font-mono text-[0.5625rem] text-ink-faint">
-            solid
+            card: an outlined chip is a real function, a filled one is a
+            reasoning step the persona performs. (These were dashed borders,
+            which read as an unfinished wireframe rather than a category.) */}
+        <p className="mt-7 font-sans text-ui leading-relaxed text-ink-faint">
+          <span className="mr-1.5 inline-block rounded-inner border border-line px-1.5 py-0.5 font-mono text-2xs text-ink-faint">
+            outlined
           </span>
           is a real callable tool.
-          <span className="mx-1.5 inline-block rounded-[5px] border border-dashed border-line px-1.5 py-0.5 font-mono text-[0.5625rem] text-ink-dim">
-            dashed
+          <span className="mx-1.5 inline-block rounded-inner bg-white/[0.05] px-1.5 py-0.5 font-mono text-2xs text-ink-subtle">
+            filled
           </span>
           is a capability the agent performs by reasoning — there is no function
           behind it. A struck-through tool needs an API key that is not set.
@@ -256,11 +263,11 @@ function NotConfiguredChip({ agent }: { agent: AgentSummary }) {
   const missing = agent.tools.filter((t) => !t.configured);
   return (
     <span
-      title={missing
+      data-tip={missing
         .map((t) => `${t.name} needs ${t.requires_key}. ${t.without_it ?? ""}`)
         .join("\n")}
       className="shrink-0 rounded-[5px] border border-warn/40 bg-[rgba(240,181,74,0.1)]
-                 px-1.5 py-0.5 font-sans text-[0.5625rem] font-medium leading-[1.6] text-warn"
+                 px-1.5 py-0.5 font-sans text-2xs font-medium leading-[1.6] text-warn"
     >
       {missing.length} tool{missing.length === 1 ? "" : "s"} off
     </span>
@@ -279,24 +286,24 @@ function CreditPill({ credits }: { credits: CreditBalance }) {
   const alert = degraded || low;
   return (
     <span
-      title={
+      data-tip={
         degraded
           ? credits.store?.detail ??
-            `Credit store unreachable — ${buffered} movement(s) buffered.`
-          : `${credits.balance.toFixed(2)} credits · ${credits.spent.toFixed(2)} spent all time`
+            `Credit store unreachable — ${buffered} movement(s) buffered. Nothing is lost; they are written back when it answers.`
+          : low
+            ? `${credits.balance.toFixed(2)} credits left, which is under ${(credits.minimum_to_start * 20).toFixed(0)}. Runs stop at ${credits.minimum_to_start.toFixed(0)}; top up in Settings before starting a long one.`
+            : `${credits.balance.toFixed(2)} credits · ${credits.spent.toFixed(2)} spent all time`
       }
       className={cn(
         "flex h-9 shrink-0 items-center gap-2 rounded-ctl border px-3",
         alert ? "border-warn/40 bg-[rgba(240,181,74,0.08)]" : "border-line bg-elevated",
       )}
     >
+      {/* No pulse. A pulsing number is an alarm with no sentence attached;
+          the tooltip carries the sentence and the amber carries the state. */}
       <span
         aria-hidden
-        className={cn(
-          "sigil h-[7px] w-[7px]",
-          alert ? "bg-warn" : "bg-accent",
-          degraded && "animate-pulse",
-        )}
+        className={cn("sigil h-[7px] w-[7px]", alert ? "bg-warn" : "bg-accent")}
       />
       <span
         className={cn(

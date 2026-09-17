@@ -88,7 +88,20 @@ class Settings(BaseSettings):
     # ids are on OpenCode Go's live /models list and they differ in a way that
     # matters: `mimo-v2.5` reads images, `mimo-v2.5-pro` rejects them.
     opencode_model_complex_pro: str = "mimo-v2.5-pro"
-    opencode_max_tokens: int = 8000
+    # 32000, not 8000, and the reason is the same class of failure as Groq's
+    # cap above — read in the other direction. A single-file deliverable ("a
+    # one-page site") is 12-20k output tokens, so at 8000 the model was cut
+    # off mid-`file_write`, every time, on a request it was otherwise
+    # answering well. The truncated arguments then failed to parse and the run
+    # retried the same doomed call until it ran out of iterations. The parse
+    # failure is now caught and explained (`agent.graph._broken_arguments`),
+    # but a ceiling below the size of the thing being asked for is its own
+    # bug. Nothing on this gateway required 8000: 16000, 32000 and 64000 were
+    # all probed against the live API, and 32000 specifically against every
+    # one of the five models these settings serve. Unlike Groq, the ceiling is
+    # not itself billed — usage is reported from tokens produced — so the
+    # headroom is free until it is used.
+    opencode_max_tokens: int = 32000
 
     # Which model_id a new session starts with unless the user picks otherwise.
     #
@@ -170,6 +183,47 @@ class Settings(BaseSettings):
     # --- Tools ------------------------------------------------------------
     e2b_api_key: str = ""
     exa_api_key: str = ""
+    # Which E2B template every session sandbox is created from. Empty means
+    # E2B's stock base image, which is what this project has always run on.
+    #
+    # The point of a *named* template is that anything a tool needs beyond
+    # that base — ruff for `lint_code` is the current case — is baked into an
+    # image built from `backend/sandbox/e2b.Dockerfile`, versioned and pinned
+    # there, rather than `pip install`ed into a user's live sandbox at the
+    # moment a tool discovers it is missing. A runtime install changes what a
+    # session can do depending on which tool happened to run first, and it
+    # cannot be reproduced from the repository. Build the template once with
+    # `e2b template build` (see `backend/sandbox/README.md`), then set this to
+    # its name or id.
+    e2b_template: str = ""
+    # The escape hatch for a deployment that cannot build a template: let
+    # `lint_code` run `pip install ruff` inside the sandbox on first use. Off
+    # by default on purpose — see the note above — and when it is off the tool
+    # reports a syntax-only check as degraded rather than installing anything.
+    sandbox_runtime_linter_install: bool = False
+
+    # --- Terminal ---------------------------------------------------------
+    # How long a command typed into the Code section's terminal panel may
+    # run. Longer than `bash_timeout_seconds` (the agent's own ceiling): the
+    # agent is told to background anything slow and split its work up, but a
+    # person typing `npm install` expects to wait for it, and 30 seconds is
+    # not enough for that on a cold sandbox.
+    terminal_timeout_seconds: int = 120
+
+    # --- Git push ---------------------------------------------------------
+    # The credential the sandbox pushes with, held by the *server* and handed
+    # to exactly one `git push` at a time through that command's environment.
+    # It is never written into the sandbox image, the repository's config, or
+    # any file in the sandbox, and it never leaves this process in an event.
+    #
+    # A fine-grained GitHub token with `contents: write` on the target repos
+    # is the intended value; any https remote that accepts token-as-password
+    # works the same way. `GITHUB_TOKEN` is accepted as an alias because that
+    # is what CI environments already export. With neither set, `push` reports
+    # that no credential is configured and does nothing.
+    git_push_token: str = Field(default="", validation_alias=AliasChoices(
+        "GIT_PUSH_TOKEN", "GITHUB_TOKEN", "git_push_token", "github_token"
+    ))
 
     # --- Agentic Loop: the ten specialist agents --------------------------
     # Each of these powers exactly one tool on one agent. Every one is
@@ -340,6 +394,10 @@ class Settings(BaseSettings):
             "image_gen": self.image_gen_enabled,
             "image_gen_provider": self.image_gen_provider,
             "resend": self.resend_enabled,
+            # Whether a `git push` from a sandbox can authenticate. The panel
+            # uses it to say "no credential configured" before someone sets a
+            # remote and wonders why the push fails.
+            "git_push": bool(self.git_push_token),
             "credits_enabled": self.credits_enabled,
             "default_model_id": self.default_model_id,
             # Per-section opening models. The client needs the whole map, not

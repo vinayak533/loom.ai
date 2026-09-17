@@ -132,7 +132,6 @@ async def run_turn(
     """
     graph = get_graph()
     get_agent(agent_id)  # raises UnknownAgent before anything is charged
-    settings = get_settings()
 
     prior = await get_state(session_id)
     attachments = await load_content_blocks(session_id, file_ids or [])

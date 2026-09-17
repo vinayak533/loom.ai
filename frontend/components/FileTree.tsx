@@ -46,6 +46,7 @@ export function FileTree({
   changed,
   onSelect,
   actions,
+  idle = false,
 }: {
   nodes: FileNode[];
   root: string;
@@ -55,6 +56,17 @@ export function FileTree({
   onSelect: (path: string) => void;
   /** Absent while there is no session to act on — the tree stays read-only. */
   actions?: TreeActions;
+  /**
+   * This session has done work before, but its sandbox is not running now.
+   *
+   * The distinction is the whole point of the flag. An empty tree looks the
+   * same in both cases and means opposite things: on a new session there is
+   * genuinely nothing yet, and on a returning one there is a whole workspace
+   * that simply is not mounted this second — the sandbox is reaped when it
+   * goes idle, and switching sections is enough to do it. Showing the
+   * new-session copy there told the user their files were gone.
+   */
+  idle?: boolean;
 }) {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -162,8 +174,9 @@ export function FileTree({
 
       {empty ? (
         <p className="px-3 py-4 text-xs leading-relaxed text-ink-faint">
-          The sandbox filesystem appears here once the agent runs its first
-          command — or as soon as you open a folder with the + button.
+          {idle
+            ? "The sandbox is idle, so there is nothing to list right now. Your files are still there — it restarts on the next command, and the tree comes back with it."
+            : "The sandbox filesystem appears here once the agent runs its first command — or as soon as you open a folder with the + button."}
         </p>
       ) : (
         <Nodes
@@ -452,7 +465,7 @@ function DraftRow({
         placeholder={kind === "dir" ? "folder name" : "file name"}
         spellCheck={false}
         className="min-w-0 flex-1 rounded-[5px] border border-accent-line bg-inset px-1.5 py-0.5
-                   font-mono text-xs text-ink outline-none placeholder:text-ink-dim
+                   font-mono text-xs text-ink outline-none placeholder:text-ink-faint
                    disabled:opacity-60"
       />
     </div>
@@ -581,7 +594,7 @@ function RootButton({
     <button
       type="button"
       onClick={onClick}
-      title={label}
+      data-tip={label}
       aria-label={label}
       className="grid h-5 w-5 touch:h-9 touch:w-9 shrink-0 place-items-center rounded-md text-ink-faint
                  transition-colors duration-150 hover:bg-elevated hover:text-ink"

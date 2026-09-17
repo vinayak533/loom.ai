@@ -218,9 +218,16 @@ TOOLS: list[dict] = [
             "one; `checkout` switches; `merge` merges another branch into the "
             "current one. Use a branch when the user asks to try something "
             "without disturbing what already works.\n\n"
-            "There is no remote and nothing is ever pushed. Do not attempt to "
-            f"push, add a remote, or authenticate — use {BASH_EXECUTE} only if "
-            "the user explicitly asks for a git operation not listed here."
+            "- `remote` shows the configured remote, or sets it when `url` is "
+            "given (https only, no credentials in the URL). `push` pushes the "
+            "current branch to it. The credential is the server's — never ask "
+            "the user for a token, never paste one into a URL or a command, and "
+            f"never push through {BASH_EXECUTE}. Push only when the user asks "
+            "for it. If the user has turned on auto-push in their History panel "
+            "the turn commits and pushes itself when you finish, so do not "
+            "commit or push at the end of a turn on your own initiative.\n\n"
+            f"Use {BASH_EXECUTE} only if the user explicitly asks for a git "
+            "operation not listed here."
         ),
         "input_schema": {
             "type": "object",
@@ -237,6 +244,8 @@ TOOLS: list[dict] = [
                         "new_branch",
                         "checkout",
                         "merge",
+                        "remote",
+                        "push",
                     ],
                     "description": "Which git operation to run.",
                 },
@@ -277,6 +286,14 @@ TOOLS: list[dict] = [
                     "description": (
                         "Branch name. Required for `new_branch`, `checkout` "
                         "and `merge`; ignored otherwise."
+                    ),
+                },
+                "url": {
+                    "type": "string",
+                    "description": (
+                        "For `remote`: the https URL to set as `origin`, e.g. "
+                        "`https://github.com/org/repo`. Omit to read the "
+                        "current one."
                     ),
                 },
             },

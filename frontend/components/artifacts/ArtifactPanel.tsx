@@ -5,6 +5,7 @@ import { Check, Clock, Code2, Eye, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { artifactVersions, saveArtifact, type ArtifactRow } from "@/lib/artifacts";
 import { cn } from "@/lib/cn";
+import { useFocusTrap } from "@/lib/useFocusTrap";
 import type { ArtifactPayload } from "@/lib/events";
 import { SPRING_SOFT, useMotionOK } from "../Anim";
 import { CodeEditor } from "../CodeEditor";
@@ -44,6 +45,9 @@ export function ArtifactPanel({
   onClose: () => void;
 }) {
   const motionOK = useMotionOK();
+  const dialog = useRef<HTMLElement>(null);
+  // Mounted only while open, so the trap is simply always on.
+  useFocusTrap(dialog, true);
   const [showSource, setShowSource] = useState(false);
   const [history, setHistory] = useState<ArtifactRow[] | null>(null);
   const [viewing, setViewing] = useState<number | null>(null);
@@ -107,6 +111,7 @@ export function ArtifactPanel({
       />
 
       <motion.section
+        ref={dialog}
         role="dialog"
         aria-modal="true"
         aria-label={artifact.title}
@@ -118,7 +123,7 @@ export function ArtifactPanel({
                    overflow-hidden rounded-card"
       >
         {/* ------------------------------------------------------------ head */}
-        <header className="flex shrink-0 items-center gap-3 border-b border-line px-5 py-3">
+        <header className="flex h-bar shrink-0 items-center gap-3 border-b border-line px-5">
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-sm font-medium text-ink">{artifact.title}</h2>
             <p className="mt-0.5 flex items-center gap-2 text-2xs text-ink-faint">

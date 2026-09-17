@@ -44,7 +44,6 @@ def check(label: str, ok: bool, detail: str = "") -> bool:
 
 async def test_search() -> None:
     print("\n[1] History search finds titles and message bodies")
-    client = get_client()
     sid = str(uuid.uuid4())
     needle = f"zqx{uuid.uuid4().hex[:8]}"
 

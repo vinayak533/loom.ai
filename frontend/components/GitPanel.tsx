@@ -118,7 +118,7 @@ function BranchMenu({
                 type="button"
                 disabled={busy}
                 onClick={() => onPick(b.name, "merge")}
-                title={`Merge ${b.name} into ${current ?? "this branch"}`}
+                data-tip={`Merge ${b.name} into ${current ?? "this branch"}`}
                 className="mr-1 shrink-0 rounded px-1.5 py-1 text-[10px] text-ink-faint
                            opacity-0 transition-opacity hover:text-accent
                            focus-visible:opacity-100 group-hover:opacity-100"
@@ -166,6 +166,154 @@ function when(iso: string): string {
   });
 }
 
+/**
+ * Where the history goes, and whether it goes by itself.
+ *
+ * One remote, `origin`, https only — the URL is validated server-side and
+ * refused if it carries a token, because the credential is the server's and
+ * must never be in a config file the sandbox can read. Under it, the opt-in:
+ * a repository that ticks "after each turn" is committed and pushed by the
+ * backend when the agent finishes, which is the Claude Code workflow. Off by
+ * default and deliberately a checkbox rather than a setting: it is a decision
+ * about *this* repository, made where the repository is shown.
+ */
+function RemoteRow({
+  remote,
+  autoPush,
+  busy,
+  canPush,
+  hasCommits,
+  onSetRemote,
+  onPush,
+  onAutoPush,
+}: {
+  remote: string | null;
+  autoPush: boolean;
+  busy: boolean;
+  /** The server holds a push credential. */
+  canPush: boolean;
+  hasCommits: boolean;
+  onSetRemote: (url: string) => void;
+  onPush?: () => void;
+  onAutoPush?: (enabled: boolean) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [url, setUrl] = useState(remote ?? "");
+
+  useEffect(() => {
+    if (!editing) setUrl(remote ?? "");
+  }, [remote, editing]);
+
+  const save = () => {
+    const clean = url.trim();
+    if (clean && clean !== remote) onSetRemote(clean);
+    setEditing(false);
+  };
+
+  const showInput = editing || !remote;
+
+  return (
+    <div className="mx-4 mb-3 rounded-ctl border border-line/60 px-3 py-2">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wide text-ink-faint">Remote</span>
+        {!showInput && (
+          <>
+            <span
+              className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink"
+              data-tip={remote ?? ""}
+            >
+              {(remote ?? "").replace(/^https:\/\//, "")}
+            </span>
+            {onPush && (
+              <button
+                type="button"
+                disabled={busy || !hasCommits}
+                onClick={onPush}
+                data-tip={hasCommits ? "Push the current branch" : "Commit something first"}
+                className="rounded-ctl border border-line px-2 py-1 text-[11px] text-ink-muted
+                           transition-colors duration-200 hover:border-accent/40 hover:text-ink
+                           disabled:opacity-40"
+              >
+                {busy ? "Working…" : "Push"}
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setEditing(true)}
+              className="text-[11px] text-ink-faint transition-colors hover:text-ink"
+            >
+              Change
+            </button>
+          </>
+        )}
+      </div>
+
+      {showInput && (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            save();
+          }}
+          className="mt-1.5 flex items-center gap-1.5"
+        >
+          <input
+            value={url}
+            onChange={(event) => setUrl(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setEditing(false);
+            }}
+            placeholder="https://github.com/you/repo"
+            aria-label="Remote repository URL"
+            spellCheck={false}
+            autoComplete="off"
+            className="h-7 min-w-0 flex-1 rounded-ctl border border-line bg-base px-2 font-mono
+                       text-[11px] text-ink placeholder:text-ink-faint focus:border-accent/40
+                       focus:outline-none"
+          />
+          <button
+            type="submit"
+            disabled={busy || !url.trim()}
+            className="rounded-ctl bg-accent px-2.5 py-1 text-[11px] font-medium text-base
+                       transition-opacity hover:opacity-90 disabled:opacity-40"
+          >
+            Set
+          </button>
+          {remote && (
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              className="text-[11px] text-ink-faint transition-colors hover:text-ink"
+            >
+              Cancel
+            </button>
+          )}
+        </form>
+      )}
+
+      {onAutoPush && (
+        <label className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-ink-muted">
+          <input
+            type="checkbox"
+            checked={autoPush}
+            disabled={busy}
+            onChange={(event) => onAutoPush(event.target.checked)}
+            className="h-3 w-3 accent-accent"
+          />
+          Commit and push after each turn
+        </label>
+      )}
+
+      {!canPush && (
+        <p className="mt-1.5 text-[10px] leading-relaxed text-warn/90">
+          No push credential on the server — set <code>GIT_PUSH_TOKEN</code> in
+          backend/.env. Commits still happen; pushes will not.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export const GitPanel = memo(function GitPanel({
   git,
   root,
@@ -178,6 +326,10 @@ export const GitPanel = memo(function GitPanel({
   onStage,
   onBranch,
   onSuggestMessage,
+  onSetRemote,
+  onPush,
+  onAutoPush,
+  canPush = true,
 }: {
   git: GitState;
   root: string;
@@ -193,6 +345,13 @@ export const GitPanel = memo(function GitPanel({
   onBranch?: (name: string, action: "create" | "checkout" | "merge") => void;
   /** Resolves to a suggested message, or "" if none could be written. */
   onSuggestMessage?: () => Promise<string>;
+  /** Set (or change) `origin`. Absent = the remote row is not shown. */
+  onSetRemote?: (url: string) => void;
+  onPush?: () => void;
+  /** Turn the end-of-turn commit-and-push on or off. */
+  onAutoPush?: (enabled: boolean) => void;
+  /** The server can authenticate a push. False shows a hint under the row. */
+  canPush?: boolean;
 }) {
   const motionOK = useMotionOK();
   const [message, setMessage] = useState("");
@@ -339,6 +498,19 @@ export const GitPanel = memo(function GitPanel({
         )}
       </div>
 
+      {onSetRemote && (
+        <RemoteRow
+          remote={git.remote ?? null}
+          autoPush={Boolean(git.auto_push)}
+          busy={busy}
+          canPush={canPush}
+          hasCommits={commits.length > 0}
+          onSetRemote={onSetRemote}
+          onPush={onPush}
+          onAutoPush={onAutoPush}
+        />
+      )}
+
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
         {changes.length > 0 && (
           <motion.section
@@ -399,7 +571,7 @@ export const GitPanel = memo(function GitPanel({
                       <span
                         className={cn(
                           "truncate font-mono text-xs group-hover:text-ink",
-                          ticked ? "text-ink" : "text-ink-dim",
+                          ticked ? "text-ink" : "text-ink-subtle",
                         )}
                       >
                         {shortPath(entry.path, root)}

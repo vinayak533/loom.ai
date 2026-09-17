@@ -11,6 +11,24 @@ export type Section = "chat" | "learning" | "code" | "agents";
 
 export const SECTIONS: Section[] = ["chat", "learning", "code", "agents"];
 
+/**
+ * The four accents as RGB channel triples, one source for the two places
+ * that need all four at once.
+ *
+ * Everything else reads `--acc` through the `accent` token and never sees a
+ * literal. SectionNav is the one legitimate exception: it shows every section
+ * side by side, so it cannot use the variable of the section it is inside.
+ * These MUST match `[data-section]` in `app/globals.css`, and this file is
+ * the only place in `app/`, `components/` or `lib/` allowed to spell an
+ * accent out (see `scripts/check-classes.mjs`).
+ */
+export const SECTION_ACCENT: Record<Section, string> = {
+  chat: "138 169 255", // #8AA9FF
+  learning: "240 181 74", // #F0B54A
+  code: "91 224 160", // #5BE0A0
+  agents: "178 138 255", // #B28AFF
+};
+
 export const FALLBACK_ROUTES: Record<Section, string> = {
   chat: "deepseek_v4_flash",
   learning: "mimo_v2_5",

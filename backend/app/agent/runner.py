@@ -144,7 +144,6 @@ async def run_turn(
     """
     graph = get_graph()
     config = _config(session_id, emitter)
-    settings = get_settings()
 
     prior = await get_state(session_id)
     attachments = await load_content_blocks(session_id, file_ids or [])

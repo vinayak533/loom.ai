@@ -152,7 +152,7 @@ export function ChapterView({
             onClick={() => onComplete(!completed)}
             className={cn(
               "flex h-10 w-full items-center justify-center gap-2 rounded-ctl text-[0.875rem]",
-              "font-semibold transition-all duration-200 active:scale-[0.99] disabled:opacity-60",
+              "font-semibold transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 active:scale-[0.99] disabled:opacity-60",
               completed
                 ? "border border-accent-line bg-accent-soft text-accent"
                 : "bg-gradient-to-br from-accent to-accent-alt text-accent-ink hover:brightness-110",

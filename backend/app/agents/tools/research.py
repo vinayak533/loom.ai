@@ -449,6 +449,21 @@ async def keyword_density(ctx: ToolContext, args: dict) -> ToolResult:
     payload = {
         "total_words": total,
         "keywords": rows,
+        # Named, because there are two conventions in circulation and they give
+        # different numbers for the same text. This one is **word share**: the
+        # percentage of the document's words that belong to the phrase, so a
+        # two-word phrase appearing 5 times in 1,000 words is 1.0%, not 0.5%.
+        # The other convention — occurrence ratio, occurrences over word count —
+        # would call it 0.5% and understate every multi-word phrase by exactly
+        # its length. The bands below are calibrated to word share, so a reader
+        # comparing this against a tool that uses the other convention is
+        # comparing two different measurements, and needs to be told which.
+        "convention": (
+            "word share: (occurrences x words_in_phrase) / total_words. A "
+            "two-word phrase used 5 times in 1,000 words scores 1.0%. Tools "
+            "reporting the occurrence ratio instead would call the same text "
+            "0.5%; the bands below assume word share."
+        ),
         "bands": {
             "absent": "0 occurrences — the phrase is not in the piece at all.",
             "thin": "below 0.5% — present, but not what the piece is about.",
@@ -457,7 +472,13 @@ async def keyword_density(ctx: ToolContext, args: dict) -> ToolResult:
         },
     }
     return ToolResult(
-        output=f"{total:,} words analysed.\n\n{as_json(payload)}", meta=payload
+        output=(
+            f"{total:,} words analysed. Density is word share — "
+            "(occurrences x words in phrase) / total words — so say which "
+            "convention you are quoting if you put these numbers in the "
+            f"piece.\n\n{as_json(payload)}"
+        ),
+        meta=payload,
     )
 
 

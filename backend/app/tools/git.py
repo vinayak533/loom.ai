@@ -24,9 +24,20 @@ Design notes a future maintainer will want:
   hard-fails with "Please tell me who you are" rather than defaulting. It is
   set repo-locally so nothing leaks between sessions.
 
-* **Nothing is pushed, ever.** There is no remote, no credential, and no
-  network path out of this module. Version control here means local history a
-  session can produce and the user can inspect or clone out — not publishing.
+* **Pushing is explicit, and the credential never touches the sandbox.**
+  A repository can be given one remote (`origin`, an https URL with no
+  credentials in it) and pushed to it, on request or — if the repository has
+  opted in through `set_auto_push` — at the end of every Code turn that
+  changed something. The token is the server's (`GIT_PUSH_TOKEN`), handed to
+  a single `git push` through that command's environment and a one-shot
+  credential helper on the command line. It is never written to the
+  sandbox's git config, to any file in the sandbox, or into the image, so a
+  user who runs `cat .git/config` sees the URL and nothing else.
+
+* **The remote and the opt-in live in the repository's own config.** They
+  are properties of *this* repository, not of the session row, and a sandbox
+  that is reaped takes its repository and those settings with it — the panel
+  shows both, and the user sets them again with the repository.
 """
 
 from __future__ import annotations
@@ -38,7 +49,13 @@ from dataclasses import dataclass
 
 from app.tools.sandbox import WORKDIR, sandbox_manager
 
-log = logging.getLogger(__name__)
+#: `_log`, not `log`, because this module's public API includes an `async def
+#: log()` — the commit-history reader — which shadows a module-level `log` from
+#: its definition onwards. Nothing used the logger, so nothing broke; the first
+#: `log.warning(...)` anyone added below line 248 would have called `.warning`
+#: on a coroutine function instead. Renaming the private one is cheaper than
+#: renaming the public one, and cheaper than the bug.
+_log = logging.getLogger(__name__)
 
 #: Identity used for commits made inside a sandbox. Local to the repo.
 GIT_USER_NAME = "Loom Agent"
@@ -110,16 +127,27 @@ class Run:
         return out or err
 
 
-async def _run(session_id: str, command: str, cwd: str | None = None) -> Run:
+async def _run(
+    session_id: str,
+    command: str,
+    cwd: str | None = None,
+    envs: dict[str, str] | None = None,
+    timeout: int = 60,
+) -> Run:
     """Run one command in the sandbox, without raising on a non-zero exit.
 
     Git uses exit status as information — `diff --quiet` returns 1 for "there
     are changes", `rev-parse` returns 128 for "not a repo" — so a non-zero exit
     is routinely the answer rather than a failure.
+
+    ``envs`` is per-command: it reaches that one process and nothing else,
+    which is what makes it the right channel for a push credential.
     """
     sandbox = await sandbox_manager.get(session_id)
     try:
-        result = await sandbox.commands.run(command, cwd=cwd or WORKDIR, timeout=60)
+        result = await sandbox.commands.run(
+            command, cwd=cwd or WORKDIR, timeout=timeout, envs=envs or None
+        )
         return Run(result.stdout or "", result.stderr or "", result.exit_code or 0)
     except Exception as exc:  # noqa: BLE001 - the SDK raises on non-zero exit
         return Run(
@@ -134,6 +162,16 @@ def _repo_path(path: str | None) -> str:
     if not path.startswith("/"):
         path = posixpath.join(WORKDIR, path)
     return posixpath.normpath(path)
+
+
+def repo_root(repo: str | None = None) -> str:
+    """Absolute sandbox path of the repository ``repo`` names, or the default.
+
+    Public because callers outside this module need it to turn `status()`'s
+    repo-relative paths into the absolute ones the file tree is keyed by —
+    `autocommit` does exactly that for the paths on a `turn_commit` frame.
+    """
+    return _repo_path(repo)
 
 
 # ---------------------------------------------------------------------------
@@ -390,13 +428,18 @@ async def snapshot(
     """
     cwd = _repo_path(repo)
     if not await is_repo(session_id, cwd):
-        return {"repo": False, "path": cwd, "branch": None, "status": [], "log": []}
+        return {
+            "repo": False, "path": cwd, "branch": None, "status": [], "log": [],
+            "remote": None, "auto_push": False,
+        }
     return {
         "repo": True,
         "path": cwd,
         "branch": await branch(session_id, cwd),
         "status": await status(session_id, cwd),
         "log": await log(session_id, cwd, limit),
+        "remote": await remote_url(session_id, cwd),
+        "auto_push": await auto_push(session_id, cwd),
     }
 
 
@@ -609,3 +652,220 @@ async def staged_diff(session_id: str, repo: str | None = None) -> str:
     # Nothing staged: describe the working tree instead, which is what an
     # unstaged "commit everything" would be about.
     return (await _run(session_id, "git diff HEAD", cwd=cwd)).stdout
+
+
+# ---------------------------------------------------------------------------
+# remote, push, and the end-of-turn opt-in
+# ---------------------------------------------------------------------------
+#
+# One remote, called `origin`, and only https. SSH would need a key in the
+# sandbox, which is exactly the thing this module promises never to put there;
+# a second remote would need a UI to choose between them and nobody has asked
+# for one. The URL is validated on the way in rather than on the way out
+# because the failure it prevents — a token pasted into the URL — is one git
+# would happily store in `.git/config` in plain text.
+
+#: The remote every push goes to.
+REMOTE_NAME = "origin"
+
+#: Repo-local config key for the end-of-turn opt-in. Namespaced so it cannot
+#: collide with anything git itself reads.
+AUTO_PUSH_KEY = "loom.autopush"
+
+#: Longer than the 60s the other commands get: a first push of a project with
+#: `node_modules` accidentally tracked, or a slow remote, is minutes not seconds.
+PUSH_TIMEOUT = 300
+
+#: Environment variable the one-shot credential helper reads. Set on the push
+#: command's environment only.
+_TOKEN_ENV = "LOOM_GIT_PUSH_TOKEN"
+
+#: Remotes a test can push to without a network: a bare repository on the
+#: sandbox's own filesystem. Refused for anything user-facing — see
+#: `validate_remote_url` — but the integration test needs a real `git push`
+#: against a real remote, and a local bare repo is the only one it can have.
+_ALLOW_FILE_REMOTES = False
+
+
+def validate_remote_url(url: str) -> str:
+    """The URL as git will store it, or a `GitError` saying why it cannot be.
+
+    Refuses anything but `https://`, and refuses a URL carrying userinfo:
+    `https://user:token@github.com/...` is the single most common way a
+    credential ends up committed to a config file, and this project holds the
+    token elsewhere on purpose.
+    """
+    url = (url or "").strip()
+    if not url:
+        raise GitError("A remote needs a URL.")
+    if any(c.isspace() for c in url) or any(c in url for c in "'\"`$\\"):
+        raise GitError("The remote URL contains characters git cannot use.")
+    if _ALLOW_FILE_REMOTES and not url.lower().startswith("https://"):
+        # Test-only: a bare repository on the local filesystem, by path or
+        # `file://`. Never true in the service.
+        return url
+    if not url.lower().startswith("https://"):
+        raise GitError("Only https:// remotes are supported.")
+    rest = url[len("https://"):]
+    host = rest.split("/", 1)[0]
+    if "@" in host:
+        raise GitError(
+            "Do not put a username or token in the remote URL — the push "
+            "credential is configured on the server (GIT_PUSH_TOKEN)."
+        )
+    if not host or "/" not in rest or not rest.split("/", 1)[1].strip("/"):
+        raise GitError("That does not look like a repository URL.")
+    return url
+
+
+async def remote_url(session_id: str, repo: str | None = None) -> str | None:
+    """The URL of `origin`, or None when no remote has been set."""
+    run = await _run(
+        session_id, f"git remote get-url {REMOTE_NAME}", cwd=_repo_path(repo)
+    )
+    if not run.ok:
+        return None
+    return run.stdout.strip() or None
+
+
+async def set_remote(session_id: str, url: str, repo: str | None = None) -> dict:
+    """Point `origin` at ``url``, creating the repository if there is none.
+
+    Idempotent: setting the same URL twice is one remote, and changing it
+    replaces the old one rather than failing on "remote already exists".
+    """
+    cwd = _repo_path(repo)
+    url = validate_remote_url(url)
+    if not await is_repo(session_id, cwd):
+        await init(session_id, cwd)
+    current = await remote_url(session_id, cwd)
+    verb = "set-url" if current else "add"
+    run = await _run(
+        session_id, f"git remote {verb} {REMOTE_NAME} {shlex.quote(url)}", cwd=cwd
+    )
+    if not run.ok:
+        raise GitError(f"Could not set the remote: {run.text}")
+    return {"remote": url, "replaced": current}
+
+
+async def remove_remote(session_id: str, repo: str | None = None) -> dict:
+    cwd = _repo_path(repo)
+    if await remote_url(session_id, cwd) is None:
+        return {"remote": None}
+    run = await _run(session_id, f"git remote remove {REMOTE_NAME}", cwd=cwd)
+    if not run.ok:
+        raise GitError(f"Could not remove the remote: {run.text}")
+    return {"remote": None}
+
+
+async def auto_push(session_id: str, repo: str | None = None) -> bool:
+    """Whether this repository has opted into the end-of-turn commit and push."""
+    run = await _run(
+        session_id, f"git config --get {AUTO_PUSH_KEY}", cwd=_repo_path(repo)
+    )
+    return run.ok and run.stdout.strip().lower() in ("true", "1", "yes", "on")
+
+
+async def set_auto_push(
+    session_id: str, enabled: bool, repo: str | None = None
+) -> dict:
+    """Record the opt-in in the repository, creating it if there is none.
+
+    Stored with the repository rather than the session on purpose: it is a
+    fact about *this* history — "record every turn here" — and it should go
+    when the history goes, not linger on a session whose next sandbox has an
+    empty directory in it.
+    """
+    cwd = _repo_path(repo)
+    if not await is_repo(session_id, cwd):
+        await init(session_id, cwd)
+    value = "true" if enabled else "false"
+    run = await _run(session_id, f"git config {AUTO_PUSH_KEY} {value}", cwd=cwd)
+    if not run.ok:
+        raise GitError(f"Could not record the setting: {run.text}")
+    return {"auto_push": bool(enabled)}
+
+
+async def push(
+    session_id: str,
+    repo: str | None = None,
+    token: str | None = None,
+    branch: str | None = None,
+) -> dict:
+    """Push the current branch to `origin`, setting it as upstream.
+
+    Returns ``{"pushed": False, "reason": ...}`` for the states that are not
+    failures of git — no remote, nothing committed, no credential — so the
+    caller can show the user what to do rather than a stack of stderr. A push
+    git itself refused (rejected, auth failed, network) raises `GitError` with
+    git's own words.
+
+    The credential goes in through ``envs`` and a helper written inline on the
+    command line, so it exists for the lifetime of that one process. `-c
+    credential.helper=` first clears any helper the image might carry, so a
+    system-wide store can neither capture the token nor answer with a
+    different one.
+    """
+    cwd = _repo_path(repo)
+    if not await is_repo(session_id, cwd):
+        return {"pushed": False, "reason": "Not a git repository yet."}
+    url = await remote_url(session_id, cwd)
+    if not url:
+        return {
+            "pushed": False,
+            "reason": "No remote is configured. Set one in the History panel first.",
+        }
+    head = await log(session_id, cwd, limit=1)
+    if not head:
+        return {"pushed": False, "reason": "Nothing to push — there are no commits yet."}
+    name = (branch or "").strip() or await branch_name(session_id, cwd)
+
+    envs = {"GIT_TERMINAL_PROMPT": "0"}
+    helper = ""
+    if token:
+        envs[_TOKEN_ENV] = token
+        # `x-access-token` is what GitHub documents for token auth over https;
+        # GitLab and Gitea ignore the username when a token is the password.
+        script = (
+            "!f() { echo username=x-access-token; "
+            'echo "password=$' + _TOKEN_ENV + '"; }; f'
+        )
+        helper = " -c credential.helper= -c " + shlex.quote(
+            "credential.helper=" + script
+        )
+    run = await _run(
+        session_id,
+        f"git{helper} push -u {REMOTE_NAME} {shlex.quote(name)}",
+        cwd=cwd,
+        envs=envs,
+        timeout=PUSH_TIMEOUT,
+    )
+    if not run.ok:
+        text = run.text
+        asked = (
+            "could not read Username" in text
+            or "terminal prompts disabled" in text
+            or "Authentication failed" in text
+        )
+        if not token and asked:
+            return {
+                "pushed": False,
+                "reason": (
+                    "The remote asked for credentials and none are configured. "
+                    "Set GIT_PUSH_TOKEN on the server and restart it."
+                ),
+                "output": text,
+            }
+        raise GitError(f"`git push` failed: {text}")
+    return {
+        "pushed": True,
+        "remote": url,
+        "branch": name,
+        "commit": head[0],
+        "output": run.text,
+    }
+
+
+#: `branch()` is the public name for the current-branch reader; this alias
+#: exists so `push()` can take a ``branch`` argument without shadowing it.
+branch_name = branch

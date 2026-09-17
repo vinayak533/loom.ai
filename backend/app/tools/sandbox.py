@@ -161,15 +161,24 @@ class SandboxManager:
                     entry.last_keepalive = now
                     return entry.sandbox
 
+            # `template` is the project's own image when one has been built
+            # (see `backend/sandbox/`), and E2B's stock base image otherwise.
+            # Nothing is ever installed into a running sandbox to make up the
+            # difference — what a template lacks, a tool reports as missing.
+            template = (settings.e2b_template or "").strip() or None
             try:
                 sandbox = await AsyncSandbox.create(
+                    template=template,
                     api_key=settings.e2b_api_key,
                     timeout=idle,
                 )
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
                 raise SandboxUnavailable(f"Could not start E2B sandbox: {exc}") from exc
 
-            log.info("Created sandbox %s for session %s", sandbox.sandbox_id, session_id)
+            log.info(
+                "Created sandbox %s for session %s (template: %s)",
+                sandbox.sandbox_id, session_id, template or "e2b default",
+            )
             self._entries[session_id] = SandboxEntry(
                 sandbox=sandbox, session_id=session_id
             )

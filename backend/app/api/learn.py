@@ -100,7 +100,7 @@ async def list_notebooks(
     ) if notebooks else []
     return [
         {**notebook, "source_count": len(sources)}
-        for notebook, sources in zip(notebooks, counts)
+        for notebook, sources in zip(notebooks, counts, strict=True)
     ]
 
 

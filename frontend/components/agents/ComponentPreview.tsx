@@ -97,7 +97,7 @@ export function ComponentPreview({
                 type="button"
                 onClick={() => setWidth(option.id)}
                 className={cn(
-                  "rounded-[6px] px-2 py-0.5 font-mono text-[0.5625rem] transition-colors duration-150",
+                  "rounded-[6px] px-2 py-0.5 font-mono text-2xs transition-colors duration-150",
                   width === option.id
                     ? "bg-raised text-ink"
                     : "text-ink-faint hover:bg-elevated hover:text-ink-muted",
@@ -117,7 +117,7 @@ export function ComponentPreview({
           className="rounded-none border-0"
         />
       ) : (
-        <div className="bg-[#0b0b0d] p-3">
+        <div className="bg-surface-solid p-3">
           <div
             className="mx-auto overflow-hidden rounded-ctl bg-white transition-[width] duration-200"
             style={{ width: active.width ? `min(${active.width}px, 100%)` : "100%" }}
@@ -135,7 +135,7 @@ export function ComponentPreview({
               style={{ height }}
             />
           </div>
-          <p className="mt-2 text-center font-sans text-2xs text-ink-dim">
+          <p className="mt-2 text-center font-sans text-2xs text-ink-subtle">
             Sandboxed render on a white ground, with Tailwind from a CDN. Not
             the Code section’s dev server — enough to see the component, no
             build step behind it.

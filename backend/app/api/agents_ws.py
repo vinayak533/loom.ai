@@ -26,6 +26,11 @@ from app.agent.llm import generate_title
 from app.api.auth import resolve_user
 from app.api.ownership import owns_row
 from app.api.ratelimit import RateLimiter
+from app.security import (
+    reject_foreign_origin,
+    websocket_client_key,
+    websocket_token,
+)
 from app.api import rerun
 from app.api.ws import _writer  # the same drain-and-coalesce loop Chat/Code use
 from app.config import get_settings
@@ -52,6 +57,8 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 _limiter = RateLimiter(get_settings().rate_limit_messages_per_minute)
+#: Connections per client address; see the Chat/Code socket for why.
+_connect_limiter = RateLimiter(60)
 
 
 @router.websocket("/ws/agent/{session_id}")
@@ -62,6 +69,14 @@ async def specialist_socket(
     token: str | None = None,
 ):
     settings = get_settings()
+
+    if await reject_foreign_origin(websocket):
+        return
+    allowed, retry_after = _connect_limiter.check(websocket_client_key(websocket))
+    if not allowed:
+        await websocket.close(code=4429, reason=f"Too many connections; retry in {retry_after}s")
+        return
+    token, subprotocol = websocket_token(websocket, token)
 
     # Overlapped for the same reason as the Chat/Code socket: two Supabase
     # round trips that do not depend on each other were being paid one after
@@ -82,7 +97,7 @@ async def specialist_socket(
         await websocket.close(code=4403, reason="Forbidden")
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=subprotocol)
 
     emitter = Emitter()
     emitter_registry.register(emitter, session_id)

@@ -70,7 +70,7 @@ export function OutputActions({
           disabled={disabled || used.has(c.kind)}
           className={cn(
             "flex items-center gap-3 rounded-card border border-line bg-elevated px-4 py-3 text-left",
-            "transition-all duration-200 ease-out",
+            "transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 ease-out",
             "hover:border-accent-line hover:bg-raised active:scale-[0.99]",
             "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:border-line disabled:hover:bg-elevated",
           )}
@@ -188,7 +188,7 @@ export function SlideDeck({ markdown }: { markdown: string }) {
               aria-current={n === index}
               onClick={() => setI(n)}
               className={cn(
-                "h-1.5 w-1.5 rounded-full p-0 transition-all duration-200",
+                "h-1.5 w-1.5 rounded-full p-0 transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200",
                 n === index ? "scale-[1.35] bg-accent" : "bg-line-strong",
               )}
             />

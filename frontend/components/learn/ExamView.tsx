@@ -172,7 +172,7 @@ export function ExamView({
                 >
                   <span
                     className={cn(
-                      "mt-px grid h-5 w-5 shrink-0 place-items-center rounded-full border font-mono text-[0.625rem]",
+                      "mt-px grid h-5 w-5 shrink-0 place-items-center rounded-full border font-mono text-2xs",
                       chosen ? "border-accent bg-accent text-accent-ink" : "border-line",
                     )}
                     aria-hidden
@@ -222,7 +222,7 @@ export function ExamView({
               onClick={() => (unanswered > 0 ? setConfirming(true) : onSubmit(answers))}
               className="ml-auto flex h-9 items-center gap-1.5 rounded-ctl bg-gradient-to-br
                          from-accent to-accent-alt px-4 text-[0.8125rem] font-semibold
-                         text-accent-ink transition-all duration-200 hover:brightness-110
+                         text-accent-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200 hover:brightness-110
                          active:scale-[0.98] disabled:opacity-60"
             >
               {submitting ? "Scoring…" : "Submit assessment"}
@@ -250,7 +250,7 @@ export function ExamView({
                 disabled={submitting}
                 onClick={() => onSubmit(answers)}
                 className="h-9 rounded-ctl bg-accent px-3.5 text-[0.8125rem] font-semibold
-                           text-accent-ink transition-all hover:brightness-110 disabled:opacity-60"
+                           text-accent-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] hover:brightness-110 disabled:opacity-60"
               >
                 {submitting ? "Scoring…" : "Submit anyway"}
               </button>

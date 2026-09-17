@@ -4,12 +4,24 @@ Storage goes to Supabase Storage with metadata in the `files` table. When
 Supabase is not configured we fall back to an in-process cache so the feature
 still works locally — the cache is intentionally bounded and non-durable.
 
-A vision-capable model reads both: images become `image` blocks, PDFs become
-`document` blocks. There is no OCR pipeline.
+Images become `image` blocks, which a vision-capable model reads directly.
+
+A PDF is **read here, not forwarded**. Every provider in this project speaks the
+OpenAI chat wire format, and that format has no portable document part — so a
+`document` block never reached a model at all: `_internal_to_openai` replaced it
+with "[A document was attached... its contents are not readable]", for vision
+models and text models alike. Attaching a PDF in Chat therefore did nothing
+except tell the model it was missing something, which is why asking for a
+summary produced a refusal instead of a summary.
+
+So the text layer is extracted at this boundary and sent as text, exactly as a
+CSV already is. There is still no OCR: a scanned PDF has no text layer, and it
+comes back saying so rather than as silence.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import uuid
@@ -17,6 +29,7 @@ from collections import OrderedDict
 
 from app.db import repository
 from app.db.supabase_client import enabled as supabase_enabled
+from app.security import safe_filename
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +68,10 @@ async def save_upload(
     if len(data) > MAX_UPLOAD_BYTES:
         raise UploadRejected("File is larger than the 20 MB limit.")
 
+    # The name goes into the storage key, and a storage key is a path. A
+    # browser-supplied `../../x.pdf` must not be allowed to decide where in
+    # the bucket the object lands.
+    filename = safe_filename(filename)
     file_id = str(uuid.uuid4())
     storage_path = f"{session_id}/{file_id}-{filename}"
 
@@ -80,7 +97,16 @@ async def save_upload(
 
 
 async def load_content_blocks(session_id: str, file_ids: list[str]) -> list[dict]:
-    """Turn uploaded file ids into internal content blocks."""
+    """Turn uploaded file ids into internal content blocks.
+
+    `_to_block` runs on a worker thread because two of its branches are real
+    CPU work on a file that can be 20 MB: pypdf parsing a PDF's page tree, and
+    the CSV sniffer decoding and profiling a spreadsheet. Both used to run
+    inline on the event loop, which stalls every other socket on the process
+    for as long as they take — and this is called on the path between the user
+    pressing Enter and the first token, so the stall is exactly where it is
+    most visible.
+    """
     if not file_ids:
         return []
 
@@ -92,7 +118,11 @@ async def load_content_blocks(session_id: str, file_ids: list[str]) -> list[dict
             data = await repository.download_file(row["storage_path"])
             if not data:
                 continue
-            blocks.append(_to_block(row["file_type"], data, row["filename"]))
+            blocks.append(
+                await asyncio.to_thread(
+                    _to_block, row["file_type"], data, row["filename"]
+                )
+            )
     else:
         bucket = _LOCAL.get(session_id, {})
         for fid in file_ids:
@@ -100,7 +130,9 @@ async def load_content_blocks(session_id: str, file_ids: list[str]) -> list[dict
             if not entry:
                 continue
             filename, content_type, data = entry
-            blocks.append(_to_block(content_type, data, filename))
+            blocks.append(
+                await asyncio.to_thread(_to_block, content_type, data, filename)
+            )
 
     return [b for b in blocks if b]
 
@@ -111,6 +143,15 @@ async def load_content_blocks(session_id: str, file_ids: list[str]) -> list[dict
 #: knows it is looking at a head rather than the entire table.
 CSV_INLINE_ROWS = 200
 CSV_SAMPLE_ROWS = 8
+
+#: How much of a PDF's text goes into the prompt. The same compromise as
+#: `CSV_INLINE_ROWS` and made for the same reason: `ingest.MAX_SOURCE_CHARS` is
+#: 400,000, which is right for Learn — where a source is chunked and retrieved
+#: against — and about 100k tokens of prompt here, where it is not. 40,000
+#: characters is roughly 10k tokens and covers a resume, a paper, a contract or
+#: a chapter whole. Past it the text is cut and the cut is stated in the block,
+#: so the model knows it is holding a head rather than the document.
+PDF_INLINE_CHARS = 40_000
 
 
 def _sniff_rows(data: bytes) -> tuple[list[str], list[list[str]], str | None]:
@@ -245,13 +286,14 @@ def _to_block(content_type: str, data: bytes, filename: str) -> dict | None:
         # as an opaque attachment.
         return {"type": "text", "text": _profile_csv(data, filename)}
 
-    b64 = base64.standard_b64encode(data).decode("utf-8")
     if content_type == PDF_TYPE:
-        return {
-            "type": "document",
-            "source": {"type": "base64", "media_type": PDF_TYPE, "data": b64},
-            "title": filename,
-        }
+        # Text, not a `document` block. See the module docstring: a document
+        # block is placeholdered out by `_internal_to_openai` for every model
+        # in the roster, so the old block was a promise the pipeline could not
+        # keep. The extractor is the one Learn and Agent 1 already use.
+        return {"type": "text", "text": _read_pdf(data, filename)}
+
+    b64 = base64.standard_b64encode(data).decode("utf-8")
     if content_type in IMAGE_TYPES:
         return {
             "type": "image",
@@ -259,3 +301,43 @@ def _to_block(content_type: str, data: bytes, filename: str) -> dict | None:
         }
     log.warning("Skipping unsupported upload type %s", content_type)
     return None
+
+
+def _read_pdf(data: bytes, filename: str) -> str:
+    """A PDF's text layer, framed so the model knows what it is holding.
+
+    Never raises and never returns nothing. A PDF that cannot be read comes
+    back as a sentence saying which kind of unreadable it is — no text layer,
+    encrypted, corrupt — because the failure the user actually hits is asking
+    for a summary and getting a shrug with no reason attached.
+    """
+    # Imported here rather than at module scope: `app.learn.ingest` pulls in
+    # pypdf, and `app.files` is imported on every worker boot whether or not
+    # anyone uploads anything.
+    from app.learn import ingest
+
+    extracted = ingest.from_pdf(data, filename)
+    if not extracted.ok:
+        return (
+            f"# {filename}\n\n"
+            f"[This PDF could not be read: {extracted.error} "
+            "Tell the user this plainly — do not guess at what the document "
+            "says.]"
+        )
+
+    text = extracted.text
+    truncated = len(text) > PDF_INLINE_CHARS
+    if truncated:
+        text = text[:PDF_INLINE_CHARS]
+
+    note = (
+        f"Truncated at {PDF_INLINE_CHARS:,} of {len(extracted.text):,} "
+        "characters — say so if the answer depends on the part that was cut."
+        if truncated
+        else f"{len(text):,} characters, complete."
+    )
+    return (
+        f"# {extracted.title}\n\n"
+        f"[PDF text layer, extracted. {note}]\n\n"
+        f"{text}"
+    )

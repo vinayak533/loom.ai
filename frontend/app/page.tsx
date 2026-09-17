@@ -23,6 +23,9 @@ import {
   commitWorkspace,
   fetchBranches,
   fetchGitState,
+  setRemote as apiSetRemote,
+  pushRemote as apiPushRemote,
+  setAutoPush as apiSetAutoPush,
   initRepo,
   stagePaths,
   suggestCommitMessage,
@@ -45,18 +48,21 @@ import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { ContextColumn, type ContextFace } from "@/components/ContextColumn";
 import { RenameDialog } from "@/components/RenameDialog";
 import { SessionSidebar, type ShelfView } from "@/components/SessionSidebar";
+import { useSessionSearch } from "@/components/SessionSearch";
 import type { HistoryAction } from "@/components/SessionHistoryMenu";
 import { LearnSection } from "@/components/learn/LearnSection";
 import { AgentSection } from "@/components/agents/AgentSection";
 import { SectionNav } from "@/components/SectionNav";
 import { StatusIndicator } from "@/components/StatusIndicator";
-import { ToastHost } from "@/components/Toast";
+import { ToastHost, ToastProvider, useToast } from "@/components/Toast";
+import { TooltipLayer } from "@/components/Tooltip";
 import { AuthPanel } from "@/components/AuthPanel";
 import { AuthScreen } from "@/components/AuthScreen";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { ShortcutsDialog } from "@/components/ShortcutsDialog";
 import { useAuth } from "@/lib/useAuth";
 import { useKeyboardInset } from "@/lib/useKeyboardInset";
+import { Tooltip } from "@/components/Tooltip";
 import { cn } from "@/lib/cn";
 import { forgetPersistedLive, readLive, writeLive } from "@/lib/liveSession";
 import {
@@ -102,6 +108,13 @@ const STALE_SESSION_KEYS = [
 // that keeps replaying a model the backend no longer registers gets it
 // silently reassigned on each load, and the accompanying notice never stops
 // appearing. v4 is the current default, Qwen 3.7 Plus.
+/**
+ * The palette searches every surface. Module-level so its identity is fixed:
+ * written inline it would be a new object on each of the many re-renders a
+ * streamed answer causes, and while `useSessionSearch` compares the fields
+ * rather than the object, there is no reason to hand it a moving target.
+ */
+const PALETTE_SEARCH_SCOPE = { all: true } as const;
 const MODEL_KEY = "coding-agent:model-choice:v4";
 const SECTION_KEY = "coding-agent:section";
 const USER_NAME = "Vinayak";
@@ -134,7 +147,21 @@ const convSectionOf = (s: Section): ConvSection => (s === "code" ? "code" : "cha
  * *behind* them in tone and blur. Depth is doing the separating that borders
  * used to do.
  */
-export default function Page() {
+/**
+ * The providers sit above the page so every section, and every callback the
+ * page defines, can reach the action toast channel and the delegated tooltip
+ * layer through context rather than through props.
+ */
+export default function PageRoot() {
+  return (
+    <ToastProvider>
+      <TooltipLayer />
+      <Page />
+    </ToastProvider>
+  );
+}
+
+function Page() {
   /**
    * One owner for the session, rather than one per component that happens to
    * need it. Signing out has to take the whole app back to a sign-in screen,
@@ -142,6 +169,13 @@ export default function Page() {
    */
   const auth = useAuth();
   useKeyboardInset();
+  const toast = useToast();
+  /**
+   * Sessions whose deletion is inside its undo window. A refetch in that
+   * window (a run ending, a section switch) would otherwise put the row
+   * straight back, since the server has not deleted it yet.
+   */
+  const pendingDeletes = useRef(new Set<string>());
   const token = auth.token;
   const projects = useProjects(token, auth.signedIn);
   /** Which project's panel is open, or null. Not a route: it is a dialog. */
@@ -270,6 +304,11 @@ export default function Page() {
    */
   const touchedThisLoad = useRef<Partial<Record<Section, true>>>({});
   /**
+   * Whether the stored picks have reached state yet. Gates the effect that
+   * writes them back; see that effect for why an ungated write loses them.
+   */
+  const modelRestored = useRef(false);
+  /**
    * The account's default model, once read. `undefined` while unknown, `null`
    * when the user has expressed no preference — which is not the same as
    * choosing the current default, and must stay distinguishable so that a
@@ -293,6 +332,7 @@ export default function Page() {
     openFile,
     openContent,
     clearTerminal,
+    runCommand,
     dismissToast,
     reloadPreview,
     dismissPreviewError,
@@ -329,10 +369,25 @@ export default function Page() {
         for (const key of Object.keys(stored) as Section[]) {
           if (stored[key] !== undefined) touchedModel.current[key] = true;
         }
-        setModelChoice((prev) => ({ ...prev, ...stored }));
+        setModelChoice((prev) => {
+          // Flagged from inside the updater rather than after the call, and
+          // that placement is the whole fix. The effect that persists
+          // `modelChoice` runs in this same commit — after this effect, before
+          // the state it schedules is applied — so it would otherwise write
+          // the *pre-restore* defaults straight over the picks still sitting
+          // in storage. Setting it here means the flag only turns true once
+          // the restored value actually exists. Re-running the updater is
+          // harmless: it assigns the same `true`.
+          modelRestored.current = true;
+          return { ...prev, ...stored };
+        });
+      } else {
+        // Nothing to restore, so nothing to protect: let writes through.
+        modelRestored.current = true;
       }
     } catch {
       /* corrupt value is not worth failing boot over */
+      modelRestored.current = true;
     }
   }, []);
 
@@ -386,7 +441,22 @@ export default function Page() {
   // reopened on Chat no matter which section you left it in. See
   // `selectSection`.
 
+  // Held back until the bootstrap above has put the stored picks into state.
+  //
+  // This is the same trap `selectSection` describes, in the one place it was
+  // still set. An effect watching `modelChoice` fires on mount with the
+  // *initial* value, which is the pre-config defaults, and overwrites
+  // `MODEL_KEY` before the restore lands — and under StrictMode's
+  // double-invoked effects the second bootstrap pass then reads back exactly
+  // that clobber, so the model you chose is replaced by the default on every
+  // reload. In development it was every reload; in a production build the
+  // second pass does not happen and the follow-up write repaired it, which is
+  // why this stayed hidden. The guard fixes both without changing what
+  // eventually gets written: the config-reconciliation and account-preference
+  // effects still persist their results, so a pick reset past a retired model
+  // is still remembered rather than re-announced on every load.
   useEffect(() => {
+    if (!modelRestored.current) return;
     localStorage.setItem(MODEL_KEY, JSON.stringify(modelChoice));
   }, [modelChoice]);
 
@@ -489,13 +559,37 @@ export default function Page() {
   // Scoped to the active surface. This is the query half of the section fix:
   // Chat asks for Chat's sessions and Code asks for Code's, so neither list can
   // contain the other's rows no matter what is in the table.
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const refreshSessions = useCallback(() => {
     listSessions(token, shelf === "archived", convSection)
-      .then(setSessions)
-      .catch(() => setSessions([]));
+      .then((rows) => setSessions(rows.filter((r) => !pendingDeletes.current.has(r.id))))
+      .catch(() => setSessions([]))
+      .finally(() => setSessionsLoaded(true));
   }, [token, shelf, convSection]);
 
   useEffect(refreshSessions, [refreshSessions, sessionId]);
+
+  // A finished run is the other moment the list goes stale. A new session is
+  // named from its first message by a background task on the server, which
+  // writes the title straight to the row and sends no event — so the sidebar
+  // kept showing "New session" until something else happened to refetch, and
+  // the name only appeared on the next reload.
+  //
+  // Keyed off the busy edge rather than a new websocket frame: the title is
+  // already written by the time a run ends (the naming task starts before the
+  // turn does and outruns it), so there is nothing to wait for and nothing to
+  // add to the event contract. The short delay is the same courtesy the rename
+  // and archive paths pay — the row is written without being awaited, and a
+  // refetch on the same tick can read the value it is replacing.
+  const wasBusy = useRef(false);
+  useEffect(() => {
+    if (wasBusy.current && !busy) {
+      const t = setTimeout(refreshSessions, 400);
+      wasBusy.current = busy;
+      return () => clearTimeout(t);
+    }
+    wasBusy.current = busy;
+  }, [busy, refreshSessions]);
 
   // A file the agent just touched turns the context column to its code face.
   // Docked, that is the whole gesture; floating, the column has to come out
@@ -517,6 +611,15 @@ export default function Page() {
   useEffect(() => {
     if (state.terminalBusy) setTerminalOpen(true);
   }, [state.terminalBusy]);
+
+  // The end-of-turn commit opens the project folder: the tree comes into
+  // view with the committed files' folders already expanded (the reducer
+  // flashed them), so what was just pushed is what the user is looking at.
+  useEffect(() => {
+    if (!state.commitSignal) return;
+    setContextFace("pulse");
+    if (!docked) setContextOpen(true);
+  }, [state.commitSignal, docked]);
 
   // A preview coming up is worth showing unprompted — it is the payoff of the
   // whole turn, and the user asked for a running site rather than a diff.
@@ -658,13 +761,36 @@ export default function Page() {
     };
   }, [sessionId, token, seedArtifacts]);
 
+  /**
+   * Optimistic and reversible. The row leaves at once, a toast holds an Undo
+   * for six seconds, and the server is only asked to delete once that window
+   * has closed. The confirm step that used to sit in the menu is gone: it
+   * taxed every deletion including the intentional ones, and undo covers the
+   * accidental ones better than a second click ever did.
+   */
   const removeSession = useCallback(
     async (id: string) => {
-      await apiDeleteSession(id, token).catch(() => undefined);
+      const row = sessions.find((s) => s.id === id);
+      pendingDeletes.current.add(id);
       setSessions((s) => s.filter((x) => x.id !== id));
       if (id === sessionId) await newSession();
+      toast.undoable(`Deleted “${row?.title?.trim() || "session"}”`, {
+        revert: () => {
+          pendingDeletes.current.delete(id);
+          refreshSessions();
+        },
+        commit: async () => {
+          try {
+            await apiDeleteSession(id, token);
+          } catch {
+            toast.notify({ text: "The session could not be deleted.", tone: "failure" });
+          } finally {
+            pendingDeletes.current.delete(id);
+          }
+        },
+      });
     },
-    [token, sessionId, newSession],
+    [sessions, token, sessionId, newSession, refreshSessions, toast],
   );
 
   /**
@@ -807,12 +933,16 @@ export default function Page() {
     try {
       await exportProject(sessionId, token);
     } catch {
-      // The button returns to rest; the sandbox being empty or gone is the
-      // usual cause and is already visible in the Pulse.
+      // The sandbox being empty or gone is the usual cause; say so rather
+      // than letting the button silently return to rest.
+      toast.notify({
+        text: "The project could not be exported. The sandbox may be empty or gone.",
+        tone: "failure",
+      });
     } finally {
       setExporting(false);
     }
-  }, [sessionId, token, exporting]);
+  }, [sessionId, token, exporting, toast]);
 
   // Hydrate the repository state when a session opens. `git_state` is pushed
   // on every change, but a browser that connects to a session with existing
@@ -965,6 +1095,61 @@ export default function Page() {
       });
   }, [sessionId, token, gitBusy, applyGitState, refreshBranches]);
 
+  // The remote, the push, and the opt-in. Same shape as the actions above:
+  // REST, then the snapshot applied, with the socket broadcast as the path a
+  // second tab hears about it on.
+  const setRemote = useCallback(
+    (url: string) => {
+      if (!sessionId || gitBusy) return;
+      setGitBusy(true);
+      setGitError(null);
+      void apiSetRemote(sessionId, url, token)
+        .then((result) => {
+          if (result.snapshot) applyGitState(result.snapshot);
+        })
+        .catch((err: unknown) =>
+          setGitError(err instanceof Error ? err.message : "Could not set the remote."),
+        )
+        .finally(() => setGitBusy(false));
+    },
+    [sessionId, token, gitBusy, applyGitState],
+  );
+
+  const pushNow = useCallback(() => {
+    if (!sessionId || gitBusy) return;
+    setGitBusy(true);
+    setGitError(null);
+    void apiPushRemote(sessionId, token)
+      .then((result) => {
+        // "Could not push" for a reason git is not to blame for — no remote,
+        // no credential — resolves rather than rejects, and is still worth
+        // saying.
+        if (!result.pushed && result.reason) setGitError(result.reason);
+        if (result.snapshot) applyGitState(result.snapshot);
+      })
+      .catch((err: unknown) =>
+        setGitError(err instanceof Error ? err.message : "Push failed."),
+      )
+      .finally(() => setGitBusy(false));
+  }, [sessionId, token, gitBusy, applyGitState]);
+
+  const setAutoPush = useCallback(
+    (enabled: boolean) => {
+      if (!sessionId || gitBusy) return;
+      setGitBusy(true);
+      setGitError(null);
+      void apiSetAutoPush(sessionId, enabled, token)
+        .then((result) => {
+          if (result.snapshot) applyGitState(result.snapshot);
+        })
+        .catch((err: unknown) =>
+          setGitError(err instanceof Error ? err.message : "Could not change that."),
+        )
+        .finally(() => setGitBusy(false));
+    },
+    [sessionId, token, gitBusy, applyGitState],
+  );
+
   // Once per session, not per turn: see `refreshBranches`.
   useEffect(refreshBranches, [refreshBranches]);
 
@@ -1051,6 +1236,44 @@ export default function Page() {
     },
     [setSessionId],
   );
+  /**
+   * Open a conversation that belongs to a *named* surface, switching to it.
+   *
+   * Deliberately not `selectSection` followed by `selectSession`. That pair
+   * reads correctly and is wrong: `setSessionId` writes into whichever section
+   * state currently holds, and the `setSection` above it has not been applied
+   * yet when the next line runs — so a Code hit chosen from Chat would land in
+   * Chat's slot. That is the same misfiling the flyout used to do, arriving by
+   * a different route, so this writes the slot by name and never by "current".
+   */
+  const openSessionIn = useCallback(
+    (target: ConvSection, id: string) => {
+      setSessionIds((prev) => ({ ...prev, [target]: id }));
+      selectSection(target);
+      setPaletteOpen(false);
+    },
+    [selectSection],
+  );
+  /**
+   * An Agents session chosen from cross-surface search. Handed down for
+   * `AgentSection` to consume once, the way a handoff's seed prompt is: the
+   * active specialist and its per-agent session map live in that component,
+   * and hoisting them here to satisfy one search result would put the whole
+   * section's state a level above the section.
+   */
+  const [agentJump, setAgentJump] = useState<{
+    agentId: string;
+    sessionId: string;
+  } | null>(null);
+  const openAgentSession = useCallback(
+    (agentId: string, id: string) => {
+      setAgentJump({ agentId, sessionId: id });
+      selectSection("agents");
+      setPaletteOpen(false);
+    },
+    [selectSection],
+  );
+  const clearAgentJump = useCallback(() => setAgentJump(null), []);
   // Read through refs so `selectFile` is not rebuilt on every file the agent
   // touches — it is passed to memoized panels, and a new identity per event
   // would re-render the whole context column mid-stream.
@@ -1216,6 +1439,45 @@ export default function Page() {
    * them, not a fourth implementation of them. Hints repeat the shortcut where
    * one exists, so the palette teaches its own replacements.
    */
+  /**
+   * The palette's other half: history, across every surface at once.
+   *
+   * Each section already searches its own shelf, and that is the right default
+   * — you are usually looking for something in the thing you are doing. What
+   * it cannot answer is the question you have when you *don't* remember which
+   * surface it happened on: the palette is the one control already reachable
+   * from all four, so it is where "search everywhere" belongs rather than in a
+   * fifth box of its own.
+   *
+   * `useSessionSearch` supplies the debounce, the cancellation and the
+   * out-of-order guard, unchanged; only the scope is new.
+   */
+  const paletteSearch = useSessionSearch(token, PALETTE_SEARCH_SCOPE);
+  const setPaletteQuery = paletteSearch.setQuery;
+  const paletteHits = useMemo<Command[]>(
+    () =>
+      paletteSearch.hits.map((hit) => ({
+        id: `history:${hit.id}`,
+        group: "History",
+        label: hit.title || "Untitled",
+        // Which surface, and — for a transcript match — the line that matched.
+        // Without the line a hit whose title has nothing to do with the query
+        // is baffling; the section is what makes a cross-surface list legible
+        // at all, since the same title can exist on two of them.
+        hint: hit.agent_id
+          ? "Agents"
+          : hit.section === "code"
+            ? "Code"
+            : "Chat",
+        detail: hit.match === "message" ? (hit.snippet ?? undefined) : undefined,
+        run: () =>
+          hit.agent_id
+            ? openAgentSession(hit.agent_id, hit.id)
+            : openSessionIn(hit.section === "code" ? "code" : "chat", hit.id),
+      })),
+    [paletteSearch.hits, openAgentSession, openSessionIn],
+  );
+
   const commands = useMemo<Command[]>(() => {
     const mod = isApplePlatform() ? "⌘" : "Ctrl";
     const codeOnly = section === "code";
@@ -1297,7 +1559,7 @@ export default function Page() {
         id: "panel.pulse",
         group: "Panels",
         label: "Show pulse",
-        keywords: "status usage cost model tree",
+        keywords: "status usage tokens model tree",
         disabled: !codeOnly,
         run: () => {
           setContextFace("pulse");
@@ -1345,15 +1607,6 @@ export default function Page() {
         disabled: !codeOnly || !sessionId || exporting,
         run: () => void exportZip(),
       },
-      {
-        id: "project.deploy",
-        group: "Project",
-        label: "Deploy to Vercel",
-        hint: "coming soon",
-        keywords: "publish ship host production",
-        disabled: true,
-        run: () => undefined,
-      },
       ...(config?.models ?? []).slice(0, 8).map((m) => ({
         id: `model.${m.id}`,
         group: "Model",
@@ -1397,11 +1650,13 @@ export default function Page() {
     connected: state.connected,
     iterations: state.iterations,
     usage: state.usage,
+    usageHistory: state.usageHistory,
     changed: state.changed,
     activeFile: state.activeFile,
     activeFileData: activeFile,
     tree: state.tree,
     treeRoot: state.treeRoot,
+    sandboxIdle: state.sandboxIdle,
     flash: state.flash,
     modelName: state.modelName,
     routingMode: state.routingMode,
@@ -1419,11 +1674,17 @@ export default function Page() {
     onStage: stageChanges,
     onBranch: runBranchOp,
     onSuggestMessage: suggestMessage,
+    onSetRemote: setRemote,
+    onPush: pushNow,
+    onAutoPush: setAutoPush,
+    canPush: Boolean(config?.git_push),
     sessionId,
     token,
     exporting,
     onToggleTerminal: toggleTerminal,
     onClearTerminal: clearTerminal,
+    onRunCommand: sessionId ? runCommand : undefined,
+    terminalCommandRunning: state.terminalCommandRunning,
     onSelectFile: selectFile,
     onExport: exportZip,
     onSaveFile: sessionId ? saveFile : undefined,
@@ -1523,6 +1784,8 @@ export default function Page() {
         files={showCodePanels ? state.tree : []}
         treeRoot={state.treeRoot}
         onSelectFile={selectFile}
+        remote={paletteHits}
+        onQueryChange={setPaletteQuery}
       />
 
       <RenameDialog
@@ -1561,13 +1824,36 @@ export default function Page() {
       <nav
         aria-label="Primary"
         className={cn(
-          "z-40 flex w-[72px] shrink-0 flex-col items-center gap-2 border-r border-line px-2.5 py-3",
+          "z-40 flex shrink-0 flex-col gap-2 border-r border-line py-3",
+          // A phone gets a labelled drawer, not a 72px strip of glyphs. The
+          // rail's labels live in tooltips, and there is no hover on a phone
+          // to reveal one, so below `sm` every control carries its name.
+          "w-[min(18rem,84vw)] px-3 sm:w-rail sm:items-center sm:px-2.5",
+          // `duration-250` is declared in tailwind.config.ts. It was not,
+          // once, and this drawer teleported instead of sliding.
           "bg-surface backdrop-blur-xl transition-transform duration-250 ease-out",
           "fixed inset-y-0 left-0 sm:static sm:translate-x-0",
           railOpen ? "translate-x-0 shadow-lift" : "-translate-x-full",
         )}
+        style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}
       >
-        <Logo />
+        <div className="flex items-center gap-2.5 sm:block">
+          <Logo />
+          <span className="text-[0.9375rem] font-semibold tracking-[-0.01em] text-ink sm:hidden">
+            Loom
+          </span>
+          <button
+            type="button"
+            onClick={() => setRailOpen(false)}
+            aria-label="Close navigation"
+            className="ml-auto grid h-11 w-11 place-items-center rounded-ctl text-ink-muted
+                       transition-colors duration-200 hover:bg-elevated hover:text-ink sm:hidden"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round">
+              <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
 
         {!ownsSurface && (
           <RailButton label="New session" onClick={newSession}>
@@ -1577,13 +1863,21 @@ export default function Page() {
           </RailButton>
         )}
 
-        <div className="my-1 h-px w-7 bg-line" />
+        <div className="my-1 h-px w-full bg-line sm:w-7" />
 
-        <SectionNav active={section} collapsed onSelect={selectSection} />
+        {/* Labelled on a phone, glyphs behind a pointer. Two instances rather
+            than one prop that flips: the travelling mark's layoutId is keyed
+            by variant, so each keeps its own. */}
+        <div className="sm:hidden">
+          <SectionNav active={section} onSelect={selectSection} />
+        </div>
+        <div className="hidden sm:block">
+          <SectionNav active={section} collapsed onSelect={selectSection} />
+        </div>
 
         {!ownsSurface && (
           <>
-            <div className="my-1 h-px w-7 bg-line" />
+            <div className="my-1 h-px w-full bg-line sm:w-7" />
 
             <RailButton
               label="Sessions"
@@ -1623,6 +1917,7 @@ export default function Page() {
           >
             <SessionSidebar
               sessions={visibleSessions}
+              loading={!sessionsLoaded}
               activeId={sessionId}
               view={shelf}
               onView={selectShelf}
@@ -1675,6 +1970,8 @@ export default function Page() {
                 status={state.status}
                 iterations={state.iterations}
                 usage={state.usage}
+                // Code reports token usage and no money — see ProjectPulse.
+                showCost={section !== "code"}
               />
             )}
 
@@ -1683,16 +1980,15 @@ export default function Page() {
                 type="button"
                 onClick={() => setPaletteOpen(true)}
                 aria-label="Open the command palette"
-                title="Command palette"
                 className="hidden h-[30px] items-center gap-2 rounded-ctl border border-line
-                           bg-elevated pl-2.5 pr-1.5 text-2xs text-ink-faint transition-all
+                           bg-elevated pl-2.5 pr-1.5 text-2xs text-ink-faint transition-[color,background-color,border-color,box-shadow,opacity,transform,filter]
                            duration-200 hover:border-line-strong hover:text-ink-muted sm:flex"
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round">
                   <circle cx="11" cy="11" r="6.5" />
                   <path d="m16 16 4 4" />
                 </svg>
-                <kbd className="rounded-[5px] bg-raised px-1.5 py-0.5 font-mono text-[0.5625rem] text-ink-faint">
+                <kbd className="rounded-inner bg-raised px-1.5 py-0.5 font-mono text-2xs text-ink-faint">
                   {isApplePlatform() ? "⌘K" : "Ctrl K"}
                 </kbd>
               </button>
@@ -1709,7 +2005,7 @@ export default function Page() {
                 aria-label="Toggle context panel"
                 className={cn(
                   "grid h-[34px] w-[34px] touch:h-11 touch:w-11 place-items-center rounded-ctl text-ink-faint",
-                  "transition-colors duration-200 hover:bg-elevated hover:text-ink xl:hidden",
+                  "transition-colors duration-200 hover:bg-elevated hover:text-ink lg:hidden",
                   contextOpen && "bg-elevated text-ink",
                 )}
               >
@@ -1748,6 +2044,8 @@ export default function Page() {
               token={token}
               config={config}
               models={config?.models ?? []}
+              jumpTo={agentJump}
+              onJumpConsumed={clearAgentJump}
             />
           )}
 
@@ -1779,9 +2077,14 @@ export default function Page() {
       </div>
 
       {/* -------------------------------------------------- context column */}
-      {/* Docked. Recessed in tone and blur so the conversation floats over it. */}
+      {/* Docked. Recessed in tone and blur so the conversation floats over it.
+          Docks at `lg`, not `xl`. Between 1024 and 1279px (an iPad in
+          landscape, a half-screen laptop window) there was ~250px of empty
+          gutter beside the conversation while every panel sat behind a
+          full-screen sheet. A narrower column is better than a modal at that
+          width; the wider clamp returns at `xl`. */}
       {showCodePanels && (
-        <aside className="glass-recessed hidden w-[clamp(360px,31vw,520px)] shrink-0 border-l xl:block">
+        <aside className="glass-recessed hidden w-[clamp(300px,32vw,380px)] shrink-0 border-l lg:block xl:w-[clamp(360px,31vw,520px)] 2xl:w-[clamp(420px,30vw,640px)]">
           <ContextColumn {...contextProps} />
         </aside>
       )}
@@ -1874,12 +2177,12 @@ function BootMark() {
 function ExportButton({ busy, onClick }: { busy: boolean; onClick: () => void }) {
   const motionOK = useMotionOK();
   return (
+    <Tooltip label="Download project (.zip)" side="bottom">
     <button
       type="button"
       onClick={onClick}
       disabled={busy}
       aria-label="Download the project as a zip"
-      title="Download project (.zip)"
       className={cn(
         "grid h-[34px] w-[34px] touch:h-11 touch:w-11 place-items-center rounded-ctl text-ink-faint",
         "transition-colors duration-200 hover:bg-elevated hover:text-ink",
@@ -1905,6 +2208,7 @@ function ExportButton({ busy, onClick }: { busy: boolean; onClick: () => void })
         </svg>
       )}
     </button>
+    </Tooltip>
   );
 }
 
@@ -1945,22 +2249,27 @@ function RailButton({
   children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      className={cn(
-        "grid h-10 w-10 shrink-0 place-items-center rounded-ctl transition-all duration-200",
-        "touch:h-11 touch:w-11",
-        "active:scale-[0.94]",
-        active
-          ? "bg-raised text-ink"
-          : "text-ink-muted hover:bg-elevated hover:text-ink",
-      )}
-    >
-      {children}
-    </button>
+    <Tooltip label={label} side="right">
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={label}
+        className={cn(
+          "flex shrink-0 items-center rounded-ctl transition-colors duration-200",
+          // Full-width and labelled in the phone drawer; a square glyph in
+          // the rail from `sm` up.
+          "h-11 w-full justify-start gap-3 px-3",
+          "sm:h-10 sm:w-10 sm:justify-center sm:gap-0 sm:px-0 sm:touch:h-11 sm:touch:w-11",
+          "active:scale-[0.94]",
+          active
+            ? "bg-raised text-ink"
+            : "text-ink-muted hover:bg-elevated hover:text-ink",
+        )}
+      >
+        {children}
+        <span className="text-sm font-medium sm:hidden">{label}</span>
+      </button>
+    </Tooltip>
   );
 }
 

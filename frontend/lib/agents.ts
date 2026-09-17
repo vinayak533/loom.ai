@@ -41,6 +41,41 @@ export type AgentSummary = {
 
 export type AgentDetail = AgentSummary & { system_prompt: string };
 
+/**
+ * The gallery's grouping: what kind of work each specialist is for.
+ *
+ * Ten equal cards gave a new user no basis for choosing between them; the
+ * gallery's own empty-state copy ("pick the one whose job this is") assumed
+ * a knowledge the cards did not supply. Grouped by the work rather than by
+ * the persona, the choice becomes "what am I trying to do", which is the
+ * question the user actually arrived with. Order is the order shown. An
+ * agent the backend adds without an entry here lands under "Other".
+ */
+export const AGENT_GROUPS: Array<{ label: string; ids: string[] }> = [
+  { label: "Writing", ids: ["document_summarizer", "email_copywriter", "seo_content_creator"] },
+  { label: "Design", ids: ["ui_component_designer", "graphic_poster_creator", "creative_prompt_engineer"] },
+  { label: "Research", ids: ["research_fact_checker"] },
+  { label: "Engineering", ids: ["code_refactoring_assistant"] },
+  { label: "Orchestration", ids: ["system_logic_router", "human_approval_gatekeeper"] },
+];
+
+export function groupAgents(agents: AgentSummary[]): Array<{ label: string; agents: AgentSummary[] }> {
+  const byId = new Map(agents.map((a) => [a.id, a]));
+  const seen = new Set<string>();
+  const groups = AGENT_GROUPS.map((g) => ({
+    label: g.label,
+    agents: g.ids.flatMap((id) => {
+      const a = byId.get(id);
+      if (!a) return [];
+      seen.add(id);
+      return [a];
+    }),
+  })).filter((g) => g.agents.length > 0);
+  const rest = agents.filter((a) => !seen.has(a.id));
+  if (rest.length) groups.push({ label: "Other", agents: rest });
+  return groups;
+}
+
 export type CreditBalance = {
   user_id: string;
   balance: number;
@@ -99,11 +134,11 @@ async function json<T>(res: Response): Promise<T> {
 export function agentSocketUrl(
   sessionId: string,
   agentId: string,
-  token?: string | null,
+  _token?: string | null,
 ): string {
   const base = WS_BASE.replace(/\/$/, "");
   const params = new URLSearchParams({ agent: agentId });
-  if (token) params.set("token", token);
+  // The token travels as a subprotocol; see `socketProtocols` in api.ts.
   return `${base}/ws/agent/${encodeURIComponent(sessionId)}?${params.toString()}`;
 }
 

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { cn } from "@/lib/cn";
+import { Meter } from "../Meter";
 import type { ExamResult, Recommendation, TopicScore } from "@/lib/courses";
 import { ResourceLink } from "./CoursePage";
 
@@ -59,17 +60,12 @@ export function ExamResults({
             {result.correct_count} / {result.total_count} correct
           </p>
 
-          <div className="mx-auto mt-4 h-1.5 max-w-[280px] overflow-hidden rounded-full bg-inset">
-            <div
-              className={cn(
-                "h-full rounded-full transition-[width] duration-500 ease-out",
-                tone === "add" && "bg-add",
-                tone === "accent" && "bg-gradient-to-r from-accent to-accent-alt",
-                tone === "warn" && "bg-warn",
-              )}
-              style={{ width: `${result.score}%` }}
-            />
-          </div>
+          <Meter
+            value={result.score}
+            tone={tone === "add" ? "good" : tone === "warn" ? "warn" : "accent"}
+            label="Score"
+            className="mx-auto mt-4 max-w-[280px]"
+          />
 
           <p className="voice-machine mt-3 text-ink-faint">
             {result.passed
@@ -92,7 +88,7 @@ export function ExamResults({
               type="button"
               onClick={onContinue}
               className="h-9 rounded-ctl bg-gradient-to-br from-accent to-accent-alt px-4
-                         text-[0.8125rem] font-semibold text-accent-ink transition-all
+                         text-[0.8125rem] font-semibold text-accent-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter]
                          duration-200 hover:brightness-110 active:scale-[0.98]"
             >
               Continue course
@@ -213,12 +209,7 @@ function WeakAreas({
             </span>
           </div>
 
-          <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-inset">
-            <div
-              className="h-full rounded-full bg-warn transition-[width] duration-500 ease-out"
-              style={{ width: `${rec.score}%` }}
-            />
-          </div>
+          <Meter value={rec.score} tone="warn" size="sm" label="Score" className="mt-2.5" />
 
           <p className="mt-3 text-[0.875rem] leading-relaxed text-ink">{rec.advice}</p>
 
@@ -274,7 +265,7 @@ function WeakAreas({
         type="button"
         onClick={onRetake}
         className="w-full rounded-ctl bg-gradient-to-br from-accent to-accent-alt py-2.5
-                   text-[0.8125rem] font-semibold text-accent-ink transition-all duration-200
+                   text-[0.8125rem] font-semibold text-accent-ink transition-[color,background-color,border-color,box-shadow,opacity,transform,filter] duration-200
                    hover:brightness-110 active:scale-[0.99]"
       >
         Reviewed it — retake the assessment
@@ -298,15 +289,13 @@ function TopicBreakdown({ topics }: { topics: TopicScore[] }) {
             </span>
             <span className="min-w-0 flex-1">
               <span className="block text-[0.875rem] font-medium text-ink">{topic.topic}</span>
-              <span className="mt-1 block h-1 overflow-hidden rounded-full bg-inset">
-                <span
-                  className={cn(
-                    "block h-full rounded-full transition-[width] duration-500 ease-out",
-                    strong ? "bg-add" : "bg-warn",
-                  )}
-                  style={{ width: `${topic.score}%` }}
-                />
-              </span>
+              <Meter
+                value={topic.score}
+                tone={strong ? "good" : "warn"}
+                size="sm"
+                label={`${topic.topic} score`}
+                className="mt-1"
+              />
             </span>
             <span className="voice-machine shrink-0 text-ink-muted">
               {topic.correct}/{topic.total} · {topic.score}%

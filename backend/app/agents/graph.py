@@ -40,13 +40,16 @@ from app.cancel import is_stopping
 from app.turnstop import (
     STOPPED_TOOL_TEXT,
     approx_tokens,
+    broken_arguments,
+    close_stream,
     partial_assistant_content,
+    prompt_text,
     stopped_result_block,
 )
 from app.agents import registry
 from app.agents.state import SpecialistState
 from app.agents.tool_registry import run as run_agent_tool, schemas_for
-from app.agents.tools.base import ToolContext
+from app.agents.tools.base import ToolContext, ToolResult
 from app.config import get_settings
 from app.credits import charge_llm, charge_tool
 from app.db import repository
@@ -373,12 +376,10 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
                 stopped = True
                 break
         if stopped:
-            close = getattr(stream, "aclose", None)
-            if close is not None:
-                try:
-                    await close()
-                except Exception:  # noqa: BLE001
-                    log.debug("Stream close failed on stop", exc_info=True)
+            # Explicitly, and through the shared helper: an abandoned stream
+            # left to the garbage collector means the provider keeps producing
+            # — and charging for — tokens nobody will read.
+            await close_stream(stream)
     except (ModelUnavailableError, ModelCallError) as exc:
         log.warning(
             "Specialist %s model call failed on %s (last attempted: %s): %s",
@@ -422,12 +423,22 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
         content = partial_assistant_content(partial_text, partial_thinking)
         messages.append({"role": "assistant", "content": content})
 
+        # An estimate, and recorded as one — the same one the Chat/Code loop
+        # makes. The provider reports usage only on the frame that never
+        # arrived, so the alternative is billing nothing. `input_tokens` used
+        # to be a hardcoded 0 here, which meant a stopped agent turn was billed
+        # for its output alone: on these agents the prompt is the expensive
+        # half — a persona, ten tool schemas and a document already in the
+        # history — so Stop was charging a small fraction of a turn that had
+        # cost the full prompt upstream. `messages[:-1]` excludes the partial
+        # assistant turn appended just above, which is output, not prompt.
         est = {
-            "input_tokens": 0,
+            "input_tokens": approx_tokens(prompt_text(messages[:-1])),
             "output_tokens": approx_tokens(partial_text + partial_thinking),
         }
         cost = estimate_cost(answered_by, est)
         totals = dict(state.get("usage") or {})
+        totals["input_tokens"] = totals.get("input_tokens", 0) + est["input_tokens"]
         totals["output_tokens"] = totals.get("output_tokens", 0) + est["output_tokens"]
         totals["cost_estimate"] = round(totals.get("cost_estimate", 0.0) + cost, 6)
 
@@ -443,13 +454,31 @@ async def agent_node(state: SpecialistState, config: RunnableConfig) -> dict:
         if emitter:
             emitter.emit(
                 ev.usage(
-                    totals.get("input_tokens", 0),
+                    totals["input_tokens"],
                     totals["output_tokens"],
                     totals["cost_estimate"],
                 )
             )
             await _emit_credits(emitter, state.get("user_id") or None, spent)
 
+        # The third thing this block was missing, alongside the input estimate
+        # and the shared stream teardown. A stopped specialist turn was charged
+        # — `charge_llm` above — and then wrote no `token_usage` row, so the
+        # usage table disagreed with the ledger for every stop, and the tokens
+        # a stop produced were invisible to anything reading it. The Chat/Code
+        # loop has always written one here.
+        repository.fire(
+            repository.record_usage(
+                session_id,
+                answered_by,
+                est["input_tokens"],
+                est["output_tokens"],
+                cost,
+                model_id=answered_by,
+                routing_mode=routing_mode,
+                routing_hint=routing_hint,
+            )
+        )
         repository.fire(repository.add_message(session_id, "assistant", content))
 
         return {
@@ -598,7 +627,24 @@ async def _execute_call(
         emitter=emitter,
         model_id=state.get("model_id") or "",
     )
-    result = await run_agent_tool(name, ctx, args, agent.tools)
+
+    # Before dispatch, not inside each tool — the same guard, and the same
+    # shared implementation, the Chat/Code loop applies. A call whose arguments
+    # were cut off by the output ceiling arrives with none of the keys the tool
+    # reads, and every getter falls back to its default. That is worse here
+    # than it is in Code: these agents' costliest arguments are whole documents
+    # and files (`chunk_document`, `parse_source`, `analyse_code`), so they are
+    # the calls most likely to be truncated, and their defaults produce a
+    # confident answer about nothing rather than an error.
+    broken = broken_arguments(name, args)
+    if broken is not None:
+        log.warning(
+            "Refusing unparseable `%s` call from %s in session %s",
+            name, agent_id or "?", session_id,
+        )
+        result = ToolResult(broken, False)
+    else:
+        result = await run_agent_tool(name, ctx, args, agent.tools)
 
     # Surcharge only on a tool that actually reached its paid third-party API.
     # A "not configured" result never called anyone, and charging for a
@@ -614,7 +660,7 @@ async def _execute_call(
         result.success
         and result.meta.get("billable", True)
         and not result.meta.get("not_configured")
-        and not (result.meta.get("approval") or {}).get("approved") is False
+        and (result.meta.get("approval") or {}).get("approved") is not False
     )
     if billable:
         charged = await charge_tool(
@@ -745,7 +791,9 @@ async def tool_node(state: SpecialistState, config: RunnableConfig) -> dict:
             return_exceptions=True,
         )
         results = []
-        for block, outcome in zip(pending, gathered):
+        # One gather over `pending`, so the lengths match by construction;
+        # `strict` is what keeps that true if the gather ever changes.
+        for block, outcome in zip(pending, gathered, strict=True):
             if isinstance(outcome, asyncio.CancelledError):
                 raise outcome
             if isinstance(outcome, BaseException):

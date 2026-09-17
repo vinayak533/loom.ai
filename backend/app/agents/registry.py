@@ -31,7 +31,7 @@ thinking, with a one-line note saying why. Nothing is in both lists, and
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from app.config import get_settings
@@ -368,6 +368,16 @@ negative prompt, then a short `### Parameters` list giving `aspect_ratio`,
 `lens`, `lighting` and `style` on their own lines.
 """,
         tools=("normalize_aspect_ratio", "list_style_modifiers"),
+        # Both of this agent's tools are local computation, so unlike Agents 6
+        # and 7 the cap is not bounding a vendor bill — it is bounding the
+        # *turn*. Every iteration is a full model call against a long persona,
+        # and nothing in a free tool's result stops a model deciding to
+        # normalise the same ratio once more.
+        #
+        # 6 is generous for the work: one ratio, one style lookup, and four
+        # spare for a prompt that genuinely needs reworking. A run that reaches
+        # it is looping, not thinking.
+        max_tool_calls_per_turn=6,
         reasoning_tools=(
             ReasoningTool(
                 "negative prompt generator",
@@ -477,6 +487,18 @@ as a document rather than a wall of text.
 `keyword_density` output: score name, value, and what it means.
 """,
         tools=("search_web", "keyword_density", "readability_score"),
+        # A cost ceiling, for the second-most-expensive agent in the set: an
+        # observed run cost 71 credits, and only Agent 7 cost more. `search_web`
+        # bills 5 credits a call, and the other two are free but are exactly the
+        # kind a model re-runs — measure, revise, measure again — so the loop
+        # that gets long here is the cheap one wrapped around the expensive one.
+        #
+        # 12 is sized to a real article rather than to a round number: two or
+        # three searches to ground the piece, then four or five measure-revise
+        # rounds across both metrics, with slack. The ceiling withdraws the
+        # schemas rather than cutting the turn off, so the last call is a
+        # write-up that says it stopped early.
+        max_tool_calls_per_turn=12,
         reasoning_tools=(),
         suggestions=(
             "1200 words on headless CMS migration",
@@ -598,11 +620,17 @@ SYSTEM_LOGIC_ROUTER = _register(
    deterministic logic — use them, and route on what they return.
 2. Reserve your own judgement for genuinely unstructured input. Say which of
    the two you used.
-3. Call `route_to_agent` to emit the directive. It is what surfaces the handoff
-   button to the user; a routing decision written only in prose is not a route.
-4. Exactly one `next_agent`. If two look equally right, that is a signal the
+3. Emit the directive by calling `route_to_agent`, and **only** by calling it.
+   The tool call is what builds the handoff button the user presses; writing
+   the same JSON into your reply produces text that looks identical to you and
+   is inert to them — nothing to click, no handoff, no route. If you have not
+   called the tool, you have not routed, however well you have described it.
+4. Never write a `next_agent` object into your message before the tool has
+   returned. The closing block is a restatement of a call that already
+   happened, not the call itself and not a substitute for it.
+5. Exactly one `next_agent`. If two look equally right, that is a signal the
    task should be split — say so and route the first half.
-5. You never execute the handoff. The user clicks it. Do not describe the next
+6. You never execute the handoff. The user clicks it. Do not describe the next
    agent's work as if it has happened.
 
 The ten routable ids are: document_summarizer, email_copywriter,
@@ -611,12 +639,20 @@ seo_content_creator, research_fact_checker, system_logic_router,
 human_approval_gatekeeper, code_refactoring_assistant.
 """,
         output_contract="""
-Two or three sentences of reasoning, then call `route_to_agent`. Your closing
-message restates the directive as a fenced ```json block:
+In this order, and the order is the contract:
+
+1. Two or three sentences of reasoning.
+2. A `route_to_agent` call. This is the deliverable — the artifact the user
+   acts on. A turn that ends without one has not routed anything.
+3. Only then, a fenced ```json block restating what you just routed:
 
 ```json
 {"next_agent": "email_copywriter", "reason": "..."}
 ```
+
+Step 3 is an echo for the reader. It is never a replacement for step 2: the
+block on its own is prose that happens to be shaped like a route, and the user
+gets no button from it.
 """,
         tools=(
             "validate_json_schema",

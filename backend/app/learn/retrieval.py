@@ -52,7 +52,7 @@ async def index_source(notebook_id: str, source_id: str, text: str) -> int:
                 "content": piece,
                 "embedding": repo.format_vector(vector),
             }
-            for i, (piece, vector) in enumerate(zip(pieces, vectors))
+            for i, (piece, vector) in enumerate(zip(pieces, vectors, strict=True))
         ]
     )
     return len(pieces)

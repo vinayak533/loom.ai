@@ -41,6 +41,18 @@
     --r-card: 16px;
     --r-ctl: 9px;
     --r-bubble: 18px;
+    /* Sub-control corners, derived so they follow the section. */
+    --r-inner: calc(var(--r-ctl) - 3px);
+
+    /* Layout chrome. One height for any bar that meets the page header, one
+       for headers inside a panel, and one horizontal inset for every
+       top-level bar and column — so stacked chrome lines up instead of each
+       component inventing its own. Read by the `h-bar`, `h-bar-sub` and
+       `px-gutter` utilities in tailwind.config.ts. */
+    --bar-h: 3.5rem;
+    --bar-h-sub: 2.75rem;
+    --gutter: 1.25rem;
+    --rail-w: 72px;
 
     /* Where the ambient field's warm pole sits, in viewport percentages. The
        agent's activity moves it; see AmbientField. */
@@ -108,9 +120,53 @@
     --r-bubble: 15px;
   }
 
+  @media (min-width: 640px) {
+    :root {
+      --gutter: 1.75rem;
+    }
+  }
+
   html,
   body {
     height: 100%;
+  }
+
+  /* ------------------------------------------------------------- mobile */
+
+  html {
+    /* iOS inflates text in landscape unless told not to. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    /* The app is its own scroll container; the page never rubber-bands. */
+    overscroll-behavior: none;
+  }
+
+  body {
+    /* No grey flash on tap — the controls draw their own pressed state. */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Removes the 300ms double-tap-to-zoom delay on every control without
+     disabling pinch-zoom on the page, which `user-scalable=no` would. */
+  button,
+  a,
+  [role="button"],
+  [role="tab"],
+  input,
+  textarea,
+  select {
+    touch-action: manipulation;
+  }
+
+  /* iOS Safari zooms the page when a field with text under 16px takes focus,
+     and the composer's `said` voice is 15px. Lifting only the *field* to 16px
+     on coarse pointers keeps the voice on desktop and the viewport on phones. */
+  @media (pointer: coarse) {
+    input:not([type="checkbox"]):not([type="radio"]),
+    textarea,
+    select {
+      font-size: max(1rem, 1em);
+    }
   }
 
   /* The floor. True black — #000000, not a near-black — the way ChatGPT's dark
@@ -148,11 +204,14 @@
   :focus {
     outline: none;
   }
+  /* `outline`, not `box-shadow`. The ring used to be a box-shadow, which is
+     *replaced* rather than composed — so any focusable card carrying
+     `shadow-e2` or `shadow-float` dropped to the floor for exactly as long as
+     it had keyboard focus, and lifted again on blur. An outline composes with
+     shadow and follows border-radius natively in every current browser. */
   :focus-visible {
-    outline: none;
-    box-shadow:
-      0 0 0 2px theme("colors.base"),
-      0 0 0 4px rgb(var(--acc) / 0.42);
+    outline: 2px solid rgb(var(--acc) / 0.42);
+    outline-offset: 2px;
     border-radius: inherit;
   }
 }
@@ -166,6 +225,20 @@
     @apply border border-line bg-elevated shadow-float;
     backdrop-filter: blur(20px) saturate(140%);
     -webkit-backdrop-filter: blur(20px) saturate(140%);
+  }
+
+  /* A 20px backdrop blur is the single most expensive paint in the app, and
+     on a phone GPU it is what makes a drawer stutter while it slides. Phones
+     get a lighter blur; the tint and hairline still do the depth work. */
+  @media (pointer: coarse) and (max-width: 767px) {
+    .glass {
+      backdrop-filter: blur(10px) saturate(130%);
+      -webkit-backdrop-filter: blur(10px) saturate(130%);
+    }
+    .glass-recessed {
+      backdrop-filter: blur(8px) saturate(110%);
+      -webkit-backdrop-filter: blur(8px) saturate(110%);
+    }
   }
 
   /* The inverse move — for surfaces that *recede* rather than float, like the

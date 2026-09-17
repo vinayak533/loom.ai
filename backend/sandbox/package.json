@@ -1,0 +1,12 @@
+{
+  "name": "loom-sandbox-template",
+  "private": true,
+  "description": "Pins the E2B CLI used to build backend/sandbox/e2b.Dockerfile. Not part of the service.",
+  "devDependencies": {
+    "@e2b/cli": "2.18.0"
+  },
+  "scripts": {
+    "build": "e2b template build --name loom-sandbox",
+    "login": "e2b auth login"
+  }
+}
